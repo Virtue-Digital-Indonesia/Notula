@@ -99,11 +99,18 @@ torch/pyannote venv (point `$NOTULA_TX_PYTHON` at it). A few build notes baked i
 - subprocesses run with a **cleaned env** (no `PYTHONHOME`/`PYTHONPATH` leaking
   into the external tx-venv python) and **explicit UTF-8** decoding.
 
-**First launch (unsigned).** The app isn't code-signed/notarized, so Gatekeeper
-will block a double-click. Right-click the app → **Open** → **Open** once (or
-`xattr -dr com.apple.quarantine /Applications/Notula.app`). The first recording
-prompts for **Microphone**; first computer-audio capture prompts for **Screen
-Recording** (grant to *Notula* now, not your terminal).
+**Signing.** `build_dmg.sh` signs the app with a stable identity (Developer ID
+if present, else your Apple Development cert). **This matters:** macOS keys the
+Screen Recording / Microphone permissions to the code signature — an *ad-hoc*
+signature (py2app's default) has no stable identity, so the grant never sticks
+and the app is re-prompted every launch. With a real identity, the grant
+persists. It's signed but **not notarized**, so on a *different* Mac Gatekeeper
+still needs a right-click → **Open** once.
+
+**First launch.** On launch Notula prompts for **Microphone** and **Screen
+Recording** (grant to *Notula*). ⚠️ **After granting Screen Recording, quit and
+reopen Notula** — macOS only activates that permission on a relaunch. After that
+it stops asking and computer-audio capture works.
 
 ## Output
 
