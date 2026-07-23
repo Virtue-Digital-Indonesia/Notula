@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Generated / machine-specific build outputs
+Notula.app/
+assets/Notula.iconset/
+build/
+dist/
+
+# macOS
+.DS_Store
+
+# Local scratch
+*.log

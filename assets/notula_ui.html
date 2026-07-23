@@ -1,0 +1,659 @@
+<style>
+/* fonts injected by the app */
+__FONTS__
+
+:root{
+  /* Carbon Gray 100 (dark) tokens */
+  --bg:#161616; --layer:#262626; --layer2:#393939; --field:#393939;
+  --border-sub:#393939; --border-strong:#6f6f6f;
+  --text:#f4f4f4; --text-2:#c6c6c6; --text-help:#8d8d8d; --text-place:#6f6f6f;
+  --link:#78a9ff; --primary:#0f62fe; --primary-h:#0353e9; --primary-a:#002d9c;
+  --on-color:#ffffff;
+  --err:#fa4d56; --ok:#42be65; --warn:#f1c21b; --info:#4589ff;
+  --focus:#ffffff;
+}
+:root[data-theme="light"]{
+  --bg:#ffffff; --layer:#f4f4f4; --layer2:#e8e8e8; --field:#f4f4f4;
+  --border-sub:#e0e0e0; --border-strong:#8d8d8d;
+  --text:#161616; --text-2:#525252; --text-help:#6f6f6f; --text-place:#a8a8a8;
+  --link:#0f62fe; --primary:#0f62fe; --primary-h:#0353e9; --primary-a:#002d9c;
+  --on-color:#ffffff;
+  --err:#da1e28; --ok:#24a148; --warn:#f1c21b; --info:#0043ce;
+  --focus:#0f62fe;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;height:100%;overflow-x:hidden;}
+body{
+  font-family:"IBM Plex Sans",system-ui,sans-serif;
+  background:var(--bg); color:var(--text);
+  font-size:13px; line-height:1.35; letter-spacing:.16px;
+  -webkit-font-smoothing:antialiased;
+}
+.mono{font-family:"IBM Plex Mono",ui-monospace,monospace; font-variant-numeric:tabular-nums;}
+a{color:var(--link);}
+
+/* ── header ── */
+.header{
+  height:42px; display:flex; align-items:center; gap:12px;
+  padding:0 14px; background:var(--bg); border-bottom:1px solid var(--border-sub);
+  position:sticky; top:0; z-index:5;
+}
+.header .mark{width:20px;height:20px;flex:0 0 auto;}
+.header .name{font-weight:600; font-size:14px; letter-spacing:.1px;}
+.header .name b{font-weight:600;} .header .name span{color:var(--text-help); font-weight:400;}
+.header .spacer{flex:1;}
+.hstat{font-size:12px; color:var(--text-2); letter-spacing:.32px; text-transform:uppercase; display:flex; align-items:center; gap:8px; white-space:nowrap;}
+.hstat .dot{width:8px;height:8px;border-radius:50%;background:var(--text-help);}
+.hstat.rec .dot{background:var(--err); animation:blink 1s steps(1) infinite;}
+.hstat.busy .dot{background:var(--info); animation:blink 1.4s steps(1) infinite;}
+@keyframes blink{50%{opacity:.25;}}
+
+/* theme content-switcher */
+.themesw{display:inline-flex;}
+.themesw button{background:transparent; color:var(--text-2);
+  border:1px solid var(--border-strong); margin-left:-1px; padding:3px 11px; height:26px; line-height:1;
+  font-family:inherit; font-size:12px; letter-spacing:.16px; cursor:pointer;}
+.themesw button:first-child{margin-left:0;}
+.themesw button.active{background:var(--primary); color:#fff; border-color:var(--primary); position:relative; z-index:1;}
+.themesw button:not(.active):hover{background:var(--layer2); color:var(--text);}
+.themesw button:focus-visible{outline:2px solid var(--focus); outline-offset:-2px; position:relative; z-index:2;}
+
+/* ── layout ── */
+.wrap{padding:12px; max-width:900px; margin:0 auto;}
+.grid{display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:1px; background:var(--border-sub);}
+.grid>.card{margin:0;}
+@media (max-width:680px){ .grid{grid-template-columns:1fr;} }
+.footbar{display:flex; gap:1px; background:var(--border-sub); margin-top:12px;}
+.footbar .btn{flex:1; width:auto; min-height:40px; text-align:center; padding-left:16px; padding-right:16px;}
+.footbar .btn.btn-tertiary{background:var(--layer2); border-color:transparent; color:var(--link);}
+.footbar .btn.btn-tertiary:hover{background:var(--border-strong); color:var(--link);}
+
+/* ── card ── */
+.card{background:var(--layer); padding:14px 16px; margin-top:12px;}
+.card:first-of-type{margin-top:0;}
+.card .chead{display:flex; align-items:center; justify-content:space-between; margin-bottom:7px;}
+.card h2{font-size:15px; font-weight:600; margin:0; letter-spacing:0;}
+.card .sub{font-size:11.5px; color:var(--text-help); margin:-2px 0 10px;}
+
+/* ── tag ── */
+.tag{font-size:12px; font-weight:400; padding:3px 10px; border-radius:12px;
+  background:var(--layer2); color:var(--text-2); white-space:nowrap; letter-spacing:.16px;}
+.tag.ok{background:rgba(66,190,101,.18); color:#6fdc8c;}
+.tag.info{background:rgba(69,137,255,.18); color:#a6c8ff;}
+.tag.err{background:rgba(250,77,86,.2); color:#ff8389;}
+.tag.warn{background:rgba(241,194,27,.2); color:#f1c21b;}
+:root[data-theme="light"] .tag.ok{color:#0e6027;}
+:root[data-theme="light"] .tag.info{color:#0043ce;}
+:root[data-theme="light"] .tag.err{color:#a2191f;}
+
+/* ── button ── */
+.btn{font-family:inherit; font-size:14px; letter-spacing:.16px; font-weight:400;
+  border:1px solid transparent; border-radius:0; cursor:pointer;
+  min-height:38px; padding:8px 52px 8px 16px; text-align:left; position:relative;
+  color:var(--on-color); background:var(--primary); transition:background .11s;
+  -webkit-appearance:none; width:100%;}
+.btn:hover{background:var(--primary-h);} .btn:active{background:var(--primary-a);}
+.btn:focus-visible{outline:2px solid var(--focus); outline-offset:-4px;}
+.btn.btn-secondary{background:var(--layer2); color:var(--text);}
+.btn.btn-secondary:hover{background:var(--border-strong);}
+.btn.btn-tertiary{background:transparent; border:1px solid var(--primary); color:var(--link);}
+.btn.btn-tertiary:hover{background:var(--primary); color:var(--on-color);}
+.btn.btn-danger{background:var(--err); color:#fff;}
+.btn.btn-danger:hover{filter:brightness(1.08);}
+.btn.small{min-height:32px; padding:6px 14px; width:auto; text-align:center; font-size:13px;}
+.btn.wauto{width:auto; padding-right:16px; text-align:center;}
+.btn[disabled]{background:var(--layer2); color:var(--text-place); cursor:not-allowed; filter:none;}
+
+/* the big record button */
+.recbtn{min-height:52px; font-size:16px; text-align:center; padding:8px 16px; display:flex; align-items:center; justify-content:center; gap:10px;}
+.recdot{width:12px;height:12px;border-radius:50%;background:#fff;flex:0 0 auto;}
+.recbtn.rec .recdot{border-radius:2px;}
+
+/* ── fields ── */
+.fields{display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:10px 16px; margin-top:4px;}
+.f{display:flex; flex-direction:column;} .f.full{grid-column:1 / -1;}
+.f label{font-size:11px; color:var(--text-2); letter-spacing:.32px; margin-bottom:3px; text-transform:uppercase;}
+.f .inp{display:flex; align-items:center; background:var(--field); border-bottom:1px solid var(--border-strong);}
+.f input{flex:1; background:transparent; border:0; color:var(--text);
+  font-family:"IBM Plex Sans",sans-serif; font-size:14px; letter-spacing:.16px;
+  height:36px; padding:0 12px 0 16px; min-width:0;}
+.f input.mono{font-variant-numeric:tabular-nums;}
+.f input:focus{outline:none;}
+.f .inp:focus-within{outline:2px solid var(--primary); outline-offset:-2px;}
+.f .unit{font-size:13px; color:var(--text-help); padding:0 14px 0 0;}
+.f input:disabled{color:var(--text-place);}
+.f .help{font-size:10px; color:var(--text-help); margin-top:3px; letter-spacing:.24px;}
+.f select{-webkit-appearance:none; appearance:none; width:100%;
+  background:var(--field); color:var(--text); border:0; border-bottom:1px solid var(--border-strong);
+  height:36px; padding:0 40px 0 16px; font-family:inherit; font-size:14px; border-radius:0; cursor:pointer;
+  background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16'><path fill='%238d8d8d' d='M8 11L3 6h10z'/></svg>");
+  background-repeat:no-repeat; background-position:right 12px center;}
+.f select:focus{outline:2px solid var(--primary); outline-offset:-2px;}
+
+.row{display:flex; align-items:center; justify-content:space-between; gap:16px; margin-top:12px;}
+.toggle{display:flex; align-items:center; gap:10px; cursor:pointer; user-select:none;}
+.toggle input{position:absolute; opacity:0; width:0; height:0;}
+.toggle .track{width:40px; height:20px; background:var(--border-strong); border-radius:10px; position:relative; transition:background .1s; flex:0 0 auto;}
+.toggle .track::after{content:""; position:absolute; top:3px; left:3px; width:14px; height:14px; border-radius:50%; background:var(--on-color); transition:transform .1s;}
+.toggle input:checked + .track{background:var(--primary);}
+.toggle input:checked + .track::after{transform:translateX(20px);}
+.toggle input:focus-visible + .track{outline:2px solid var(--focus); outline-offset:2px;}
+.toggle .tlab{font-size:13px; color:var(--text);}
+
+/* ── meter ── */
+.meter{margin:6px 0 2px;}
+.meter .top{display:flex; justify-content:space-between; align-items:baseline; margin-bottom:4px;}
+.meter .lab{font-size:11.5px; color:var(--text-2); letter-spacing:.32px;}
+.meter .val{font-size:12.5px; color:var(--text);}
+.meter .track{height:5px; background:var(--layer2); overflow:hidden;}
+.meter .fill{height:100%; width:0%; background:var(--primary); transition:width .25s ease, background .2s;}
+.meter .fill.good{background:var(--ok);}
+
+/* ── record panel ── */
+.recwrap{display:flex; flex-direction:column; gap:12px;}
+.timer{font-size:34px; font-weight:600; letter-spacing:.5px; color:var(--text); text-align:center; padding:2px 0;}
+.timer.idle{color:var(--text-place);}
+.recmeta{text-align:center; font-size:11.5px; color:var(--text-help); letter-spacing:.24px; min-height:14px;}
+
+/* audio sources (mic + computer) with live level + mute */
+.srcrow{background:var(--layer2); padding:10px 12px;}
+.srcrow.off{opacity:.6;}
+.srchead{display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;}
+.srcctl{display:flex; align-items:center; gap:12px;}
+.srcname{font-size:12px; letter-spacing:.32px; text-transform:uppercase; color:var(--text-2); display:flex; align-items:center; gap:8px;}
+.srcname .live{width:7px;height:7px;border-radius:50%;background:var(--text-place);}
+.srcrow.active .srcname .live{background:var(--err); animation:blink 1s steps(1) infinite;}
+.mutebtn{background:transparent; border:1px solid var(--border-strong); color:var(--text-2);
+  height:26px; padding:2px 14px; font-family:inherit; font-size:12px; letter-spacing:.16px; cursor:pointer; border-radius:0;}
+.mutebtn:hover{background:var(--layer); color:var(--text);}
+.mutebtn.on{background:var(--err); border-color:var(--err); color:#fff;}
+.mutebtn[disabled]{opacity:.4; cursor:not-allowed; pointer-events:none;}
+.srcdev{-webkit-appearance:none; appearance:none; width:100%; background:var(--field); color:var(--text);
+  border:0; border-bottom:1px solid var(--border-strong); height:32px; padding:0 34px 0 12px;
+  font-family:inherit; font-size:13px; border-radius:0; cursor:pointer;
+  background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16'><path fill='%238d8d8d' d='M8 11L3 6h10z'/></svg>");
+  background-repeat:no-repeat; background-position:right 10px center;}
+.srcdev:focus{outline:2px solid var(--primary); outline-offset:-2px;}
+.vis{display:flex; align-items:stretch; gap:8px; margin-top:9px; height:36px;}
+.wave{flex:1; height:36px; width:100%; display:block; background:var(--field);}
+.vu{width:6px; background:var(--field); position:relative; overflow:hidden; flex:0 0 auto;}
+.vufill{position:absolute; bottom:0; left:0; right:0; height:0%; background:var(--ok); transition:height .09s linear;}
+.vufill.hot{background:var(--err);}
+.srchint{font-size:10.5px; color:var(--text-help); margin-top:7px; letter-spacing:.24px;}
+.srchint a{cursor:pointer;}
+
+/* ── meetings list ── */
+.mlist{display:flex; flex-direction:column; gap:1px; background:var(--border-sub); margin-top:2px;}
+.mrow{display:flex; align-items:center; gap:12px; background:var(--layer); padding:11px 4px;}
+.minfo{flex:1; min-width:0;}
+.mname{font-size:13.5px; color:var(--text); font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+.mmeta{font-size:11.5px; color:var(--text-help); margin-top:2px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;}
+.mmeta .dotsep{opacity:.5;}
+.mactions{display:flex; align-items:center; gap:6px; flex:0 0 auto;}
+.mprog{flex:0 0 200px; min-width:160px;}
+.mempty{color:var(--text-help); font-size:12.5px; padding:14px 4px; text-align:center;}
+.iconbtn{background:transparent; border:1px solid var(--border-strong); color:var(--text-2);
+  min-height:32px; padding:6px 10px; font-family:inherit; font-size:12.5px; cursor:pointer; border-radius:0;}
+.iconbtn:hover{background:var(--layer2); color:var(--text);}
+.iconbtn.danger:hover{background:var(--err); color:#fff; border-color:var(--err);}
+.iconbtn[disabled]{opacity:.4; cursor:not-allowed; pointer-events:none;}
+
+/* header gear */
+.gearbtn{background:transparent; border:1px solid var(--border-strong); color:var(--text-2);
+  height:26px; min-width:30px; padding:0 6px; font-size:14px; line-height:1; cursor:pointer; border-radius:0;}
+.gearbtn:hover{background:var(--layer2); color:var(--text);}
+.gearbtn.on{background:var(--primary); border-color:var(--primary); color:#fff;}
+
+/* test-input row + note */
+.testrow{display:flex; align-items:center; gap:12px; margin-top:2px;}
+.recnote{font-size:11px; color:var(--text-help); letter-spacing:.2px; line-height:1.45;}
+.recnote b{color:var(--text-2); font-weight:600;}
+
+/* modal (transcribe dialog) */
+.modal{display:none; position:fixed; inset:0; background:rgba(0,0,0,.55); z-index:200; align-items:flex-start; justify-content:center;}
+.modal.show{display:flex;}
+.modalbox{background:var(--layer); width:440px; max-width:calc(100vw - 32px); margin-top:60px; box-shadow:0 24px 70px rgba(0,0,0,.55);}
+.modalhead{display:flex; align-items:center; justify-content:space-between; padding:14px 16px 4px;}
+.modalhead h2{font-size:15px; font-weight:600; margin:0; letter-spacing:0;}
+.modalsub{padding:0 16px 4px; font-size:12.5px; color:var(--text-help);}
+.modalbox .fields{padding:8px 16px 0;}
+.modalnote{padding:8px 16px 0; font-size:11px; color:var(--warn); letter-spacing:.2px; min-height:12px;}
+.modalbtns{display:flex; gap:1px; background:var(--border-sub); margin-top:14px;}
+.modalbtns .btn{flex:1; text-align:center; padding-left:16px; padding-right:16px; min-height:42px;}
+
+/* ── toast ── */
+#toasts{position:fixed; top:50px; right:16px; display:flex; flex-direction:column;
+  gap:8px; z-index:100; width:320px; max-width:calc(100vw - 32px);}
+.toast{display:flex; align-items:flex-start; gap:10px; background:var(--layer2);
+  color:var(--text); border-left:3px solid var(--info); padding:13px 14px;
+  font-size:13px; line-height:1.4; box-shadow:0 10px 30px rgba(0,0,0,.45);
+  transform:translateX(120%); opacity:0;
+  transition:transform .3s cubic-bezier(.2,.8,.2,1), opacity .3s;}
+.toast.in{transform:none; opacity:1;}
+.toast.ok{border-left-color:var(--ok);}
+.toast.warn{border-left-color:var(--warn);}
+.toast.err{border-left-color:var(--err);}
+.toast .tx{flex:1; min-width:0;}
+.toast .close{cursor:pointer; color:var(--text-help); font-size:16px; line-height:1; padding:0 2px; margin-top:-1px;}
+.toast .close:hover{color:var(--text);}
+@media (prefers-reduced-motion:reduce){ .toast{transition:opacity .2s;} }
+</style>
+
+<div class="header">
+  <svg class="mark" viewBox="0 0 24 24" aria-hidden="true">
+    <rect x="3"  y="9"  width="2.6" height="6"  rx="1.3" fill="#0f62fe"/>
+    <rect x="7.4" y="5"  width="2.6" height="14" rx="1.3" fill="#0f62fe"/>
+    <rect x="11.8" y="2" width="2.6" height="20" rx="1.3" fill="#4589ff"/>
+    <rect x="16.2" y="6" width="2.6" height="12" rx="1.3" fill="#0f62fe"/>
+    <rect x="20"  y="9"  width="2.6" height="6"  rx="1.3" fill="#0f62fe"/>
+  </svg>
+  <div class="name"><b>Notula</b> <span>meeting transcriber</span></div>
+  <div class="spacer"></div>
+  <div class="themesw" role="group" aria-label="Theme">
+    <button data-mode="auto"  onclick="post('setTheme',{mode:'auto'})">Auto</button>
+    <button data-mode="light" onclick="post('setTheme',{mode:'light'})">Light</button>
+    <button data-mode="dark"  onclick="post('setTheme',{mode:'dark'})">Dark</button>
+  </div>
+  <button id="gear" class="gearbtn" onclick="toggleSettings()" title="App settings" aria-label="App settings">⚙</button>
+  <div id="hstat" class="hstat"><span class="dot"></span><span id="hstat_t">Idle</span></div>
+</div>
+
+<div id="toasts" aria-live="polite"></div>
+
+<div class="wrap">
+
+  <!-- ── RECORD ── -->
+  <section class="card">
+    <div class="chead"><h2>Record</h2><span id="rec_tag" class="tag">Idle</span></div>
+    <div class="recwrap">
+      <div id="timer" class="timer idle mono">0:00</div>
+      <div id="recmeta" class="recmeta">Ready to record</div>
+
+      <div class="f full">
+        <label>Meeting name</label>
+        <div class="inp"><input id="meeting_name" placeholder="Weekly sync" maxlength="80"></div>
+      </div>
+
+      <!-- source: microphone -->
+      <div class="srcrow" id="row_mic">
+        <div class="srchead">
+          <span class="srcname"><span class="live"></span>Microphone</span>
+          <button class="mutebtn" id="mute_mic" onclick="toggleMute('mic')">Mute</button>
+        </div>
+        <select class="srcdev" id="mic_dev" onchange="post('pickMic',{index:this.value})"></select>
+        <div class="vis">
+          <canvas id="wave_mic" class="wave"></canvas>
+          <div class="vu"><div id="vu_mic" class="vufill"></div></div>
+        </div>
+      </div>
+
+      <!-- source: computer audio (ScreenCaptureKit — no loopback driver needed) -->
+      <div class="srcrow" id="row_system">
+        <div class="srchead">
+          <span class="srcname"><span class="live"></span>Computer audio</span>
+          <div class="srcctl">
+            <label class="toggle"><input id="sys_on" type="checkbox" onchange="onSysToggle(this.checked)"><span class="track"></span></label>
+            <button class="mutebtn" id="mute_system" onclick="toggleMute('system')">Mute</button>
+          </div>
+        </div>
+        <div class="vis">
+          <canvas id="wave_system" class="wave"></canvas>
+          <div class="vu"><div id="vu_system" class="vufill"></div></div>
+        </div>
+        <div id="sys_hint" class="srchint"></div>
+      </div>
+
+      <button id="rec_btn" class="btn btn-danger recbtn" onclick="onRecord()">
+        <span class="recdot"></span><span id="rec_label">Record</span>
+      </button>
+
+      <div class="testrow">
+        <button id="test_btn" class="btn btn-secondary small wauto" onclick="post('toggleMonitor')">Test input</button>
+        <span class="recnote" id="recnote">The meters move only while recording. Tap <b>Test input</b> to preview your mic &amp; computer audio without recording.</span>
+      </div>
+
+      <div class="row" style="margin-top:2px;">
+        <label class="toggle"><input id="auto_tx" type="checkbox" onchange="post('setAuto',{value:this.checked})"><span class="track"></span><span class="tlab">Transcribe automatically when I stop</span></label>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── MEETINGS ── -->
+  <section class="card">
+    <div class="chead">
+      <h2>Meetings</h2>
+      <div style="display:flex; align-items:center; gap:10px;">
+        <button class="btn btn-tertiary small wauto" onclick="post('importAudio')">Import audio…</button>
+        <span id="meet_count" class="tag">0</span>
+      </div>
+    </div>
+    <div class="sub">Record a meeting, or <b>drag an audio file onto the window</b> (or Import) to transcribe a recording you already have → speaker-labeled <span class="mono">output.txt</span>.</div>
+    <div id="mlist" class="mlist"></div>
+  </section>
+
+  <!-- ── APP SETTINGS (hidden; toggled by the ⚙ gear) ── -->
+  <section class="card" id="settings_panel" style="display:none;">
+    <div class="chead"><h2>App settings</h2><button class="iconbtn" onclick="toggleSettings()">Close</button></div>
+    <div class="fields">
+      <div class="f full">
+        <label>HuggingFace token <span id="hf_tag" class="tag" style="margin-left:6px;">—</span></label>
+        <div class="inp"><input id="hf_token" type="password" placeholder="hf_… (for speaker diarization)" onchange="post('setToken',{value:this.value})"></div>
+        <span class="help">Stored privately in your config. Without it, transcripts have no speaker labels.</span>
+      </div>
+      <div class="f full">
+        <label>Library folder</label>
+        <div class="inp"><input id="library" disabled><span class="unit" style="cursor:pointer;color:var(--link);padding-right:12px;" onclick="post('pickLibrary')">Change</span></div>
+        <span class="help">Where meeting folders are saved. Transcription model: large-v3.</span>
+      </div>
+    </div>
+  </section>
+
+  <div class="footbar">
+    <button class="btn btn-secondary" onclick="post('refresh')">Refresh</button>
+    <button class="btn btn-secondary" onclick="post('openLibrary')">Open library</button>
+    <button class="btn btn-tertiary"  onclick="post('quit')">Quit</button>
+  </div>
+
+</div>
+
+<!-- ── TRANSCRIBE DIALOG (appears when you transcribe a meeting) ── -->
+<div id="tx_modal" class="modal">
+  <div class="modalbox">
+    <div class="modalhead"><h2>Transcribe</h2><button class="iconbtn" onclick="closeTranscribe()">✕</button></div>
+    <div class="modalsub" id="tx_name">meeting</div>
+    <div class="fields">
+      <div class="f full">
+        <label>Language</label>
+        <div class="inp"><input id="tx_lang" placeholder="id" maxlength="8"></div>
+        <span class="help">Whisper language code — id, en, …</span>
+      </div>
+      <div class="f">
+        <label>Min speakers</label>
+        <div class="inp"><input id="tx_min" class="mono" inputmode="numeric"><span class="unit">0 = auto</span></div>
+      </div>
+      <div class="f">
+        <label>Max speakers</label>
+        <div class="inp"><input id="tx_max" class="mono" inputmode="numeric"><span class="unit">0 = auto</span></div>
+      </div>
+    </div>
+    <div class="modalnote" id="tx_note"></div>
+    <div class="modalbtns">
+      <button class="btn btn-secondary" onclick="closeTranscribe()">Cancel</button>
+      <button class="btn btn-primary" onclick="startTranscribe()">Start transcription</button>
+    </div>
+  </div>
+</div>
+
+<script>
+function post(action, extra){
+  try{ window.webkit.messageHandlers.notula.postMessage(Object.assign({action:action}, extra||{})); }catch(e){}
+}
+function $(id){ return document.getElementById(id); }
+function setTag(el, text, kind){ if(!el) return; el.textContent=text; el.className="tag "+(kind||""); }
+function esc(s){ return (s==null?'':String(s)); }
+
+var STATE = {recording:false, txId:null};
+var MEETINGS = [];
+var MUTED = {mic:false, system:false};
+var WAVE = {mic:[], system:[]};
+var WN = 64;
+var WAS_ACTIVE = false;
+
+function syncMute(kind, muted){
+  MUTED[kind] = !!muted;
+  var b=$('mute_'+kind);
+  if(b){ b.classList.toggle('on', MUTED[kind]); b.textContent = MUTED[kind]?'Muted':'Mute'; }
+}
+function toggleMute(kind){ syncMute(kind, !MUTED[kind]); post('setMute',{kind:kind, muted:MUTED[kind]}); }
+
+window.SYS_AVAILABLE = true; window.SCREEN_OK = true;
+function updateSysUI(on){
+  var active = on && window.SYS_AVAILABLE;
+  var row=$('row_system'); if(row) row.classList.toggle('off', !active);
+  var mb=$('mute_system'); if(mb) mb.disabled = !active;
+  var hint=$('sys_hint'); if(!hint) return;
+  if(!window.SYS_AVAILABLE){ hint.textContent='Computer audio needs macOS 13 or newer.'; }
+  else if(on && !window.SCREEN_OK){ hint.textContent='Needs Screen Recording permission — macOS will ask when you record.'; }
+  else if(on){ hint.textContent='Captures all computer audio via ScreenCaptureKit — no extra drivers.'; }
+  else { hint.textContent='Off. Turn on to also record the other participants (system audio).'; }
+}
+function onSysToggle(on){ post('setSystemCapture',{value:on}); updateSysUI(on); }
+
+function drawWave(kind, idle){
+  var c=$('wave_'+kind); if(!c) return;
+  var dpr=window.devicePixelRatio||1;
+  var w=c.clientWidth, h=c.clientHeight; if(!w||!h) return;
+  if(c.width!==Math.round(w*dpr)||c.height!==Math.round(h*dpr)){ c.width=Math.round(w*dpr); c.height=Math.round(h*dpr); }
+  var ctx=c.getContext('2d'); ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,w,h);
+  var a=WAVE[kind]; var bw=w/WN; var mid=h/2;
+  var css=getComputedStyle(document.documentElement);
+  var base = MUTED[kind] ? css.getPropertyValue('--text-place') : css.getPropertyValue('--ok');
+  var hot = css.getPropertyValue('--err');
+  for(var i=0;i<a.length;i++){
+    var lv=a[i]; var bh=Math.max(1, lv*(h-2));
+    ctx.fillStyle = (!MUTED[kind] && lv>0.9) ? hot : base;
+    var x=(WN-a.length+i)*bw;
+    ctx.fillRect(x+bw*0.15, mid-bh/2, Math.max(1,bw*0.7), bh);
+  }
+}
+function pushWave(kind, level){ var a=WAVE[kind]; a.push(level); if(a.length>WN) a.shift(); drawWave(kind,false); }
+function resetMeters(){
+  ['mic','system'].forEach(function(kind){
+    WAVE[kind]=[]; var vu=$('vu_'+kind); if(vu){ vu.style.height='0%'; vu.className='vufill'; }
+    var row=$('row_'+kind); if(row) row.classList.remove('active'); drawWave(kind,true);
+  });
+}
+window.notulaLevels = function(p){
+  ['mic','system'].forEach(function(kind){
+    var d=p[kind]; var row=$('row_'+kind);
+    if(d){
+      if(row) row.classList.add('active');
+      if(d.muted!==MUTED[kind]) syncMute(kind, d.muted);
+      var vu=$('vu_'+kind); if(vu){ vu.style.height=Math.round(d.level*100)+'%'; vu.className='vufill'+((!MUTED[kind]&&d.level>0.9)?' hot':''); }
+      pushWave(kind, MUTED[kind]?0:d.level);
+    } else {
+      if(row) row.classList.remove('active');
+      var vu2=$('vu_'+kind); if(vu2) vu2.style.height='0%';
+    }
+  });
+};
+
+/* numeric fields auto-commit on change / Enter -> setField{key,value} */
+document.querySelectorAll('input[data-key]').forEach(function(inp){
+  function commit(){ post('setField',{key:inp.dataset.key, value:inp.value}); }
+  inp.addEventListener('change', commit);
+  inp.addEventListener('keydown', function(e){ if(e.key==='Enter'){ inp.blur(); } });
+});
+
+/* ── Python -> JS ── */
+window.applyTheme = function(mode, dark){
+  document.documentElement.setAttribute('data-theme', dark ? 'dark':'light');
+  var btns=document.querySelectorAll('.themesw button');
+  for(var i=0;i<btns.length;i++){ btns[i].classList.toggle('active', btns[i].dataset.mode===mode); }
+};
+
+window.notulaField = function(key, value){ var el=$('f_'+key); if(el) el.value=value; };
+
+window.notulaInit = function(c){
+  applyTheme((c.theme&&c.theme.mode)||'auto', c.theme?c.theme.dark:true);
+  var s=c.settings||{};
+  if($('auto_tx')) $('auto_tx').checked = !!s.auto_transcribe;
+  if($('library')) $('library').value = s.library||'';
+  if($('hf_token')){ $('hf_token').value=''; $('hf_token').placeholder = s.hf_ok ? '•••••••• saved — paste a new token to replace' : 'hf_… (for speaker diarization)'; }
+  setTag($('hf_tag'), s.hf_ok?'set':'not set', s.hf_ok?'ok':'warn');
+  window.TXDEFAULTS = {lang: s.lang||'id', min: (s.min_speakers||0), max: (s.max_speakers||0), hf_ok: !!s.hf_ok};
+
+  var inputs = c.inputs||[];
+  fillSelect('mic_dev', inputs.map(function(d){ return {value:String(d.index), label:'['+d.index+'] '+d.name}; }), String(c.mic_selected));
+
+  window.SYS_AVAILABLE = !!c.system_available;
+  window.SCREEN_OK = !!c.screen_ok;
+  if($('sys_on')){ $('sys_on').checked = !!c.system_capture; $('sys_on').disabled = !c.system_available; }
+  updateSysUI(!!c.system_capture);
+
+  syncMute('mic', MUTED.mic); syncMute('system', MUTED.system);
+  drawWave('mic', true); drawWave('system', true);
+};
+
+var _selKey={};
+function fillSelect(id, opts, sel){
+  var s=$(id); if(!s) return;
+  var key=opts.map(function(o){return o.value+':'+o.label;}).join('|');
+  if(_selKey[id]!==key){ _selKey[id]=key; s.innerHTML='';
+    opts.forEach(function(o){ var el=document.createElement('option'); el.value=o.value; el.textContent=o.label; s.appendChild(el); }); }
+  if(sel!==undefined && sel!==null){ for(var i=0;i<s.options.length;i++){ if(s.options[i].value===String(sel)){ s.selectedIndex=i; break; } } }
+}
+
+window.notulaState = function(st){
+  STATE = st;
+  /* header pill */
+  var h=$('hstat'); var kind = st.recording?'rec':(st.txId?'busy':'');
+  h.className='hstat '+kind;
+  $('hstat_t').textContent = st.header||'Idle';
+
+  /* record card */
+  var t=$('timer'); t.textContent = st.elapsed||'0:00';
+  t.className='timer mono'+(st.recording?'':' idle');
+  $('recmeta').textContent = st.recmeta||'';
+  setTag($('rec_tag'), st.recTag||'Idle', st.recTagKind||'');
+
+  var b=$('rec_btn'), lbl=$('rec_label');
+  if(st.recording){ b.className='btn btn-secondary recbtn rec'; lbl.textContent='Stop'; b.disabled=false; }
+  else { b.className='btn btn-danger recbtn'; lbl.textContent='Record'; b.disabled=!st.canRecord; }
+  var tb=$('test_btn');
+  if(tb){
+    if(st.monitoring){ tb.textContent='Stop test'; tb.className='btn small wauto'; tb.disabled=false; }
+    else { tb.textContent='Test input'; tb.className='btn btn-secondary small wauto'; tb.disabled=!st.canTest; }
+  }
+  var busy = st.recording || st.monitoring;
+  $('mic_dev').disabled = busy;
+  if($('sys_on') && window.SYS_AVAILABLE!==false) $('sys_on').disabled = busy;
+  if(!busy && WAS_ACTIVE) resetMeters();
+  WAS_ACTIVE = busy;
+
+  /* live transcription progress on the active row */
+  if(st.txId && st.progress){
+    var mp=$('mp_'+st.txId), ms=$('ms_'+st.txId);
+    if(mp) mp.style.width = Math.round(st.progress.frac*100)+'%';
+    if(ms) ms.textContent = st.progress.msg||'';
+  }
+};
+
+window.notulaMeetings = function(list){
+  MEETINGS = list||[];
+  var wrap=$('mlist'); wrap.innerHTML='';
+  setTag($('meet_count'), String(MEETINGS.length), MEETINGS.length?'info':'');
+  if(!MEETINGS.length){ var e=document.createElement('div'); e.className='mempty'; e.textContent='No meetings yet — record one above.'; wrap.appendChild(e); return; }
+  MEETINGS.forEach(function(m){ wrap.appendChild(renderRow(m)); });
+};
+
+var STATUS_TAG = {
+  recording:['Recording','err'], importing:['Importing','warn'], recorded:['Recorded','info'],
+  transcribing:['Transcribing','warn'], transcribed:['Transcribed','ok'], error:['Error','err']
+};
+
+function renderRow(m){
+  var row=document.createElement('div'); row.className='mrow'; row.id='m_'+m.id;
+
+  var info=document.createElement('div'); info.className='minfo';
+  var name=document.createElement('div'); name.className='mname'; name.textContent=m.name; info.appendChild(name);
+  var meta=document.createElement('div'); meta.className='mmeta';
+  var st=STATUS_TAG[m.status]||[m.status,''];
+  var parts=[m.created, m.duration];
+  meta.innerHTML='';
+  var tg=document.createElement('span'); tg.className='tag '+st[1]; tg.textContent=st[0]; meta.appendChild(tg);
+  parts.forEach(function(p){ if(!p) return; var s=document.createElement('span'); s.className='dotsep'; s.textContent='·'; meta.appendChild(s); var v=document.createElement('span'); v.textContent=p; meta.appendChild(v); });
+  if(m.diarized){ var s2=document.createElement('span'); s2.className='dotsep'; s2.textContent='·'; meta.appendChild(s2); var d=document.createElement('span'); d.textContent='speakers'; meta.appendChild(d); }
+  if(m.status==='error' && m.warning){ var s3=document.createElement('span'); s3.className='dotsep'; s3.textContent='·'; meta.appendChild(s3); var wv=document.createElement('span'); wv.textContent=m.warning; wv.title=m.warning; meta.appendChild(wv); }
+  info.appendChild(meta);
+  row.appendChild(info);
+
+  if(m.status==='transcribing'){
+    var seeded = (STATE.txId===m.id && STATE.progress) ? STATE.progress : null;
+    var prog=document.createElement('div'); prog.className='mprog';
+    var meter=document.createElement('div'); meter.className='meter'; meter.style.margin='0';
+    var top=document.createElement('div'); top.className='top';
+    var lab=document.createElement('span'); lab.className='lab'; lab.id='ms_'+m.id;
+    lab.textContent = seeded ? (seeded.msg||'working…') : 'working…';
+    top.appendChild(lab); meter.appendChild(top);
+    var track=document.createElement('div'); track.className='track';
+    var fill=document.createElement('div'); fill.className='fill'; fill.id='mp_'+m.id;
+    if(seeded) fill.style.width = Math.round(seeded.frac*100)+'%';
+    track.appendChild(fill); meter.appendChild(track);
+    prog.appendChild(meter); row.appendChild(prog);
+    return row;
+  }
+  if(m.status==='importing'){
+    var imp=document.createElement('div'); imp.className='mprog';
+    var isp=document.createElement('span'); isp.className='lab'; isp.style.color='var(--text-help)'; isp.textContent='converting…';
+    imp.appendChild(isp); row.appendChild(imp);
+    return row;
+  }
+
+  var acts=document.createElement('div'); acts.className='mactions';
+  var busy = !!STATE.txId || STATE.recording || STATE.monitoring;
+  if(m.hasAudio){
+    var tb=document.createElement('button'); tb.className='btn btn-primary small';
+    tb.textContent = (m.status==='transcribed')?'Re-transcribe':'Transcribe';
+    tb.disabled = busy; tb.onclick=function(){ openTranscribe(m.id, m.name); };
+    acts.appendChild(tb);
+  }
+  if(m.hasOutput){
+    var cb=document.createElement('button'); cb.className='iconbtn'; cb.textContent='Copy'; cb.title='Copy output.txt';
+    cb.onclick=function(){ post('copyOutput',{id:m.id}); }; acts.appendChild(cb);
+    var ob=document.createElement('button'); ob.className='iconbtn'; ob.textContent='Open'; ob.title='Open output.txt';
+    ob.onclick=function(){ post('openOutput',{id:m.id}); }; acts.appendChild(ob);
+  }
+  var rb=document.createElement('button'); rb.className='iconbtn'; rb.textContent='Reveal'; rb.title='Show in Finder';
+  rb.onclick=function(){ post('reveal',{id:m.id}); }; acts.appendChild(rb);
+  var db=document.createElement('button'); db.className='iconbtn danger'; db.textContent='✕'; db.title='Delete meeting';
+  db.disabled = busy; db.onclick=function(){ post('delete',{id:m.id}); }; acts.appendChild(db);
+  row.appendChild(acts);
+  return row;
+}
+
+function onRecord(){ post(STATE.recording?'stopRecording':'startRecording',{name:($('meeting_name')||{}).value||''}); }
+
+function toggleSettings(){
+  var p=$('settings_panel'), g=$('gear');
+  var show = p.style.display==='none';
+  p.style.display = show?'block':'none';
+  if(g) g.classList.toggle('on', show);
+}
+
+var TX_ID=null;
+function openTranscribe(id, name){
+  TX_ID=id;
+  var d=window.TXDEFAULTS||{lang:'id',min:0,max:0,hf_ok:false};
+  if($('tx_name')) $('tx_name').textContent=name||'meeting';
+  if($('tx_lang')) $('tx_lang').value=d.lang;
+  if($('tx_min')) $('tx_min').value=d.min;
+  if($('tx_max')) $('tx_max').value=d.max;
+  if($('tx_note')) $('tx_note').textContent = d.hf_ok ? '' : 'No HuggingFace token set — you’ll get a plain transcript with no speaker labels (set one via ⚙).';
+  $('tx_modal').classList.add('show');
+}
+function closeTranscribe(){ $('tx_modal').classList.remove('show'); TX_ID=null; }
+function startTranscribe(){
+  if(!TX_ID) return;
+  var mn=parseInt(($('tx_min')||{}).value,10); if(isNaN(mn)||mn<0) mn=0;
+  var mx=parseInt(($('tx_max')||{}).value,10); if(isNaN(mx)||mx<0) mx=0;
+  var lang=((($('tx_lang')||{}).value)||'id').trim()||'id';
+  post('transcribe',{id:TX_ID, lang:lang, min_speakers:mn, max_speakers:mx});
+  closeTranscribe();
+}
+document.addEventListener('keydown', function(e){ if(e.key==='Escape'){ closeTranscribe(); } });
+(function(){ var m=$('tx_modal'); if(m) m.addEventListener('click', function(e){ if(e.target===m) closeTranscribe(); }); })();
+
+window.showToast = function(text, kind){
+  var c=$('toasts'); if(!c) return;
+  var t=document.createElement('div'); t.className='toast '+(kind||'info');
+  var tx=document.createElement('div'); tx.className='tx'; tx.textContent=text;
+  var x=document.createElement('div'); x.className='close'; x.textContent='×';
+  var gone=false;
+  function dismiss(){ if(gone) return; gone=true; t.classList.remove('in'); setTimeout(function(){ t.remove(); }, 300); }
+  x.onclick=dismiss;
+  t.appendChild(tx); t.appendChild(x); c.appendChild(t);
+  requestAnimationFrame(function(){ t.classList.add('in'); });
+  setTimeout(dismiss, 5000);
+};
+</script>

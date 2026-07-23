@@ -1,0 +1,20 @@
+# Notula — GUI app dependencies (macOS, Apple Silicon).
+# Install into the app's own venv:
+#   python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt
+#
+# These are ONLY what the window/app needs. Transcription itself shells out to:
+#   * whisper-cli          — `brew install whisper-cpp`  (+ the large-v3 & silero models)
+#   * ffmpeg / ffprobe     — `brew install ffmpeg`
+#   * the transcription venv (torch / pyannote / soundfile) for diarization —
+#     that's a SEPARATE venv (default: ../.venv), not installed by this file.
+
+pyobjc-core>=10
+pyobjc-framework-Cocoa>=10           # AppKit / Foundation
+pyobjc-framework-WebKit>=10          # WKWebView Carbon UI
+pyobjc-framework-AVFoundation>=10    # microphone permission (TCC) prompt
+pyobjc-framework-ScreenCaptureKit>=10  # computer/system audio capture (like OBS), no loopback
+pyobjc-framework-CoreMedia>=10       # PCM extraction from SCK sample buffers
+pyobjc-framework-libdispatch>=10     # dispatch queue for the SCK audio callback
+pyobjc-framework-Quartz>=10          # screen-recording permission preflight
+sounddevice>=0.5                     # real-time mic capture (bundles PortAudio) — levels + mute
+numpy>=1.26                          # level (RMS) + mixing math in the audio callback
