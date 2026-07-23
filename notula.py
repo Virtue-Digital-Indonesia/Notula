@@ -34,7 +34,7 @@ try:
 except ImportError:                                    # pragma: no cover
     NSRunLoopCommonModes = "kCFRunLoopCommonModes"
 from AppKit import (
-    NSApplication, NSWindow, NSMenu, NSMenuItem, NSColor, NSAlert,
+    NSApplication, NSWindow, NSMenu, NSMenuItem, NSColor, NSAlert, NSSecureTextField,
     NSOpenPanel, NSPasteboard, NSPasteboardTypeString, NSPasteboardTypeFileURL,
     NSDragOperationCopy, NSDragOperationNone,
     NSApplicationActivationPolicyRegular, NSBackingStoreBuffered,
@@ -53,6 +53,10 @@ import sysaudio
 import appicon
 
 HANDLER = "notula"   # must match window.webkit.messageHandlers.<name> in the HTML
+
+# the gated pyannote model diarization uses — the user must accept its terms once
+HF_MODEL_URL = "https://huggingface.co/pyannote/speaker-diarization-community-1"
+HF_TOKENS_URL = "https://huggingface.co/settings/tokens"
 
 
 # ---- resources ---------------------------------------------------------------
@@ -221,6 +225,59 @@ class Bridge(NSObject):
             self._toast("Allow Notula in System Settings › Privacy & Security › "
                         "Screen Recording to capture computer audio, then relaunch.",
                         "warn")
+
+        # HuggingFace token — needed for speaker diarization; prompt if missing.
+        if not config.hf_token(self.cfg):
+            self._prompt_hf_token()
+
+    @objc.python_method
+    def _prompt_hf_token(self):
+        """Launch-time popup to collect the HuggingFace token, with a reminder to
+        accept the gated model's terms first. Skippable (transcripts still work,
+        just without speaker labels)."""
+        while True:
+            alert = NSAlert.alloc().init()
+            alert.setMessageText_("Enable speaker labels (diarization)")
+            alert.setInformativeText_(
+                "To label who is speaking, Notula uses the pyannote model, which is "
+                "free but gated — you must do this once:\n\n"
+                "1.  Open the model page and click Agree/Accept its terms:\n"
+                f"      {HF_MODEL_URL}\n"
+                "2.  Create a HuggingFace access token (Read):\n"
+                f"      {HF_TOKENS_URL}\n"
+                "3.  Paste the token below.\n\n"
+                "You can Skip — you'll still get full transcripts, just without "
+                "speaker labels. Add a token later under the ⚙ gear.")
+            field = NSSecureTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 340, 24))
+            field.setPlaceholderString_("hf_…")
+            alert.setAccessoryView_(field)
+            alert.addButtonWithTitle_("Save & enable")
+            alert.addButtonWithTitle_("Open HuggingFace…")
+            alert.addButtonWithTitle_("Skip")
+            try:
+                alert.window().setInitialFirstResponder_(field)
+            except Exception:
+                pass
+            resp = alert.runModal()
+            if resp == 1000:                      # Save & enable
+                tok = str(field.stringValue()).strip()
+                if tok:
+                    self.cfg["hf_token"] = tok
+                    config.save(self.cfg)
+                    self._push_init()
+                    self._toast("Token saved — speaker labels enabled ✓", "ok")
+                else:
+                    self._toast("No token entered — diarization stays off. Add one "
+                                "later under ⚙.", "warn")
+                return
+            elif resp == 1001:                    # Open HuggingFace, then re-ask
+                subprocess.Popen(["open", HF_MODEL_URL])
+                subprocess.Popen(["open", HF_TOKENS_URL])
+                continue
+            else:                                 # Skip
+                self._toast("Skipped — transcripts won't have speaker labels "
+                            "until you add a HuggingFace token (⚙).", "warn")
+                return
 
     @objc.python_method
     def _after_startup_mic(self, granted):
@@ -722,7 +779,14 @@ class Bridge(NSObject):
             self._toast("Transcribed with speakers ✓", "ok")
         else:
             why = result.get("warning") or "no diarization"
-            self._toast(f"Transcribed (plain — {why})", "warn")
+            low = why.lower()
+            if any(k in low for k in ("auth", "token", "401", "403", "gated", "permission")):
+                self._toast("Transcribed, but diarization couldn't authenticate — "
+                            "check your token and that you accepted the model terms "
+                            "at huggingface.co/pyannote/speaker-diarization-community-1.",
+                            "warn")
+            else:
+                self._toast(f"Transcribed (plain — {why})", "warn")
 
     @objc.python_method
     def _tx_failed(self, mid, err):
