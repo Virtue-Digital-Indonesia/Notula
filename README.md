@@ -28,9 +28,11 @@ button and a library in front of it.
    see it's capturing, and a **Mute** button you can toggle mid-meeting. Manual
    start/stop, live timer. Multiple sources are mixed on stop.
    **Test input** previews the meters live without recording.
-2. **Import** — already have a recording? **Drag an audio/video file onto the
-   window** (or click *Import audio…*). It's converted to 16 kHz mono and added
-   to your library, ready to transcribe. Handles m4a, mp3, wav, mov, mp4, …
+2. **Import** — already have a recording (incl. OBS `.mov`/`.mp4`)? **Drop it on
+   the window or the Dock icon** (or *Import audio…*, or Open With ▸ Notula). It's
+   converted to 16 kHz mono with ffmpeg and added to your library, ready to
+   transcribe. Video is fine — the audio track is extracted. m4a, mp3, wav, mov,
+   mp4, mkv, aac, …
 3. **Save** — every meeting is its own folder in your library, with the
    recording and a `meta.json`.
 4. **Transcribe** — a small dialog lets you set language + speaker count per
@@ -148,8 +150,13 @@ two are recorded to separate WAVs and mixed to `audio.wav` on stop.
 
 | Source | Permission | Prompted |
 |---|---|---|
-| Microphone | Privacy › Microphone | on first record (or app launch) |
-| Computer audio | Privacy › Screen Recording | on first record with it enabled |
+| Microphone | Privacy › Microphone | **on launch** (and before recording) |
+| Computer audio | Privacy › Screen Recording | **on launch** when the source is on |
+
+Notula checks both on startup and prompts for whatever hasn't been decided; if a
+permission is off it points you to the right System Settings pane. (macOS only
+prompts once — after that you toggle it in System Settings, and Screen Recording
+changes need an app relaunch.)
 
 Because Notula currently runs as plain `python3`, the prompt is attributed to the
 launching app (Terminal / iTerm / your IDE). Grant it there. A signed `.app`

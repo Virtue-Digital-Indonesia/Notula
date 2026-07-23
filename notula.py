@@ -201,9 +201,34 @@ class Bridge(NSObject):
         self._push_init()
         self._push_meetings()
         self._push_state()
-        # surface the macOS mic prompt early if we've never asked
-        if permissions.mic_status() == permissions.NOT_DETERMINED:
-            permissions.request_mic(lambda granted: None)
+        self._startup_permissions()
+
+    @objc.python_method
+    def _startup_permissions(self):
+        """On launch, check + prompt for both permissions the app needs:
+        Microphone (to record you) and Screen Recording (for computer audio)."""
+        st = permissions.mic_status()
+        if st == permissions.NOT_DETERMINED:
+            permissions.request_mic(
+                lambda g: AppHelper.callAfter(self._after_startup_mic, bool(g)))
+        elif st in (permissions.DENIED, permissions.RESTRICTED):
+            self._toast("Microphone is off — turn on Notula in System Settings › "
+                        "Privacy & Security › Microphone so it can record you.", "warn")
+
+        # Screen Recording powers computer-audio capture (ScreenCaptureKit).
+        if self.system_on and not permissions.screen_recording_ok():
+            permissions.request_screen_recording()
+            self._toast("Allow Notula in System Settings › Privacy & Security › "
+                        "Screen Recording to capture computer audio, then relaunch.",
+                        "warn")
+
+    @objc.python_method
+    def _after_startup_mic(self, granted):
+        if granted:
+            self._toast("Microphone ready", "ok")
+        else:
+            self._toast("Microphone access denied — enable it later in System "
+                        "Settings › Privacy & Security › Microphone.", "warn")
 
     @objc.python_method
     def _push_init(self):
@@ -906,6 +931,21 @@ class AppDelegate(NSObject):
     def applicationShouldTerminateAfterLastWindowClosed_(self, app):
         return True
 
+    def application_openFiles_(self, app, files):
+        # Dropping a file on the Dock icon, "Open With ▸ Notula", or `open -a
+        # Notula file.mov` — import + convert each. The most reliable drag path.
+        b = getattr(self, "bridge", None)
+        if b is not None:
+            for f in files:
+                try:
+                    b._import_path(str(f))
+                except Exception:
+                    pass
+        try:
+            app.replyToOpenOrPrint_(0)   # NSApplicationDelegateReplySuccess
+        except Exception:
+            pass
+
     def applicationWillTerminate_(self, note):
         # Cmd-Q / menu Quit terminate: without unwinding main()'s finally, so run
         # teardown here too (finalize the recording, kill transcription children).
@@ -929,10 +969,15 @@ class DropWebView(WKWebView):
 
     @objc.python_method
     def _dropped_file(self, sender):
+        pb = sender.draggingPasteboard()
         try:
-            urls = sender.draggingPasteboard().readObjectsForClasses_options_([NSURL], None)
+            urls = pb.readObjectsForClasses_options_(
+                [NSURL], {"NSPasteboardURLReadingFileURLsOnly": True})
         except Exception:
-            return None
+            try:
+                urls = pb.readObjectsForClasses_options_([NSURL], None)
+            except Exception:
+                urls = None
         for u in (urls or []):
             p = u.path()
             if p and os.path.isfile(p):

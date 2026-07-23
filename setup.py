@@ -44,8 +44,8 @@ OPTIONS = {
         "CFBundleName": "Notula",
         "CFBundleDisplayName": "Notula",
         "CFBundleIdentifier": "id.val.notula",
-        "CFBundleVersion": "1.0",
-        "CFBundleShortVersionString": "1.0",
+        "CFBundleVersion": "1.1",
+        "CFBundleShortVersionString": "1.1",
         "NSHighResolutionCapable": True,
         "LSApplicationCategoryType": "public.app-category.productivity",
         "LSMinimumSystemVersion": "13.0",
@@ -53,6 +53,18 @@ OPTIONS = {
         "NSMicrophoneUsageDescription":
             "Notula records your microphone so it can transcribe your meetings.",
         "NSHumanReadableCopyright": "MIT-licensed · Built by Virtue Digital Indonesia",
+        # audio/video files Notula can open (Dock-icon drop, "Open With ▸ Notula")
+        "CFBundleDocumentTypes": [{
+            "CFBundleTypeName": "Audio or video recording",
+            "CFBundleTypeRole": "Viewer",
+            "LSHandlerRank": "Alternate",
+            "LSItemContentTypes": [
+                "public.audio", "public.movie", "public.mpeg-4",
+                "public.mpeg-4-audio", "com.apple.quicktime-movie",
+                "public.mp3", "public.aac-audio", "com.microsoft.waveform-audio",
+                "org.matroska.mkv", "public.avi", "public.aiff-audio",
+            ],
+        }],
         # Finder/Dock-launched apps get an ASCII locale that mangles non-ASCII
         # transcript text and subprocess output — force UTF-8.
         "LSEnvironment": {"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
