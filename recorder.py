@@ -231,6 +231,18 @@ class RecordingEngine:
             if src.kind == kind:
                 src.muted = bool(muted)
 
+    def relocate(self, new_folder: str) -> None:
+        """Point the engine at a folder that was renamed underneath it.
+
+        Renaming a directory moves its inode, so the capture threads keep
+        writing through their already-open handles without noticing. Only the
+        paths we resolve *later* — the per-source WAVs we mix at stop() and the
+        final audio.wav — have to be rewritten to the new location.
+        """
+        self.folder = new_folder
+        for src in self.sources:
+            src.wav_path = os.path.join(new_folder, os.path.basename(src.wav_path))
+
     def get_source(self, kind: str):
         for src in self.sources:
             if src.kind == kind:

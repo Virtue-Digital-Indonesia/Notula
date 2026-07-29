@@ -58,6 +58,14 @@ HANDLER = "notula"   # must match window.webkit.messageHandlers.<name> in the HT
 HF_MODEL_URL = "https://huggingface.co/pyannote/speaker-diarization-community-1"
 HF_TOKENS_URL = "https://huggingface.co/settings/tokens"
 
+# what ffmpeg is allowed to be pointed at on import. Also a guard: AppKit hands
+# the script path to application:openFiles: when the app is run from source, so
+# without this a plain `python notula.py` imports notula.py as a "meeting".
+MEDIA_EXTS = ("wav", "w64", "mp3", "mp2", "m4a", "m4b", "aac", "aif", "aiff",
+              "flac", "ogg", "oga", "opus", "caf", "wma", "amr", "au", "mka",
+              "mp4", "mov", "m4v", "webm", "mkv", "avi", "flv", "wmv", "asf",
+              "mpg", "mpeg", "ts", "mts", "m2ts", "vob", "3gp", "3g2")
+
 
 # ---- resources ---------------------------------------------------------------
 
@@ -132,6 +140,8 @@ class Bridge(NSObject):
         self.monitor = None
         self.rec = None
         self.rec_mid = None
+        self.rec_name = ""
+        self.rec_seq = 0        # bumped per recording; survives a mid-flight rename
         self._stopping = False
         self.tx_mid = None
         self._tx_progress = None
@@ -344,6 +354,8 @@ class Bridge(NSObject):
             "canRecord": (not recording and not monitoring and not self.tx_mid and self.mic_idx is not None),
             "canTest": (not recording and not self.tx_mid and self.mic_idx is not None),
             "txId": self.tx_mid,
+            "recId": self.rec_mid if recording else None,
+            "recName": self.rec_name if recording else None,
             "progress": self._tx_progress,
             "header": header,
             "recTag": rec_tag,
@@ -415,6 +427,8 @@ class Bridge(NSObject):
             self._open_path(library.output_path(self.cfg["library"], str(body.get("id") or "")))
         elif action == "reveal":
             self._open_path(library.folder(self.cfg["library"], str(body.get("id") or "")))
+        elif action == "rename":
+            self._rename(str(body.get("id") or ""), str(body.get("name") or ""))
         elif action == "delete":
             self._delete(str(body.get("id") or ""))
         elif action == "pickMic":
@@ -519,27 +533,31 @@ class Bridge(NSObject):
             return
         self.rec = engine
         self.rec_mid = mid
+        self.rec_name = library.read_meta(root, mid).get("name") or ""
+        self.rec_seq += 1
         self._push_state()
         self._push_meetings()
         # confirm audio is actually flowing (mic TCC / device busy) off the main thread
-        threading.Thread(target=self._await_start, args=(mid,), daemon=True).start()
+        threading.Thread(target=self._await_start, args=(self.rec_seq,), daemon=True).start()
 
     @objc.python_method
-    def _await_start(self, mid):
+    def _await_start(self, seq):
         rec = self.rec                       # snapshot: main thread may clear self.rec
         ok = rec.wait_until_started(6.0) if rec else False
-        AppHelper.callAfter(self._on_started, mid, ok)
+        AppHelper.callAfter(self._on_started, seq, ok)
 
     @objc.python_method
-    def _on_started(self, mid, ok):
-        # a stop (or a superseding start) already in flight owns finalization
-        if self.rec_mid != mid or self._stopping:
+    def _on_started(self, seq, ok):
+        # a stop (or a superseding start) already in flight owns finalization.
+        # keyed on the session counter, not the id — a rename changes the id.
+        if self.rec_seq != seq or self.rec is None or self._stopping:
             return
         if ok:
             src = "mic + computer audio" if self.system_on else "microphone"
             self._toast(f"Recording {src}…", "ok")
         else:
-            self.rec, self.rec_mid = None, None
+            mid = self.rec_mid
+            self.rec, self.rec_mid, self.rec_name = None, None, ""
             library.update_meta(self.cfg["library"], mid, status=library.ERROR,
                                 warning="recording did not start")
             self._toast("Recording didn't start — allow microphone access for your "
@@ -569,7 +587,7 @@ class Bridge(NSObject):
     def _on_stopped(self, mid, duration):
         root = self.cfg["library"]
         library.update_meta(root, mid, status=library.RECORDED, duration=duration)
-        self.rec, self.rec_mid = None, None
+        self.rec, self.rec_mid, self.rec_name = None, None, ""
         self._stopping = False
         self._tx_progress = None
         self._push_state()
@@ -583,7 +601,7 @@ class Bridge(NSObject):
         """A capture stream ended on its own (device unplugged/seized). Salvage
         whatever was written and settle the UI instead of wedging."""
         rec, mid = self.rec, self.rec_mid
-        self.rec, self.rec_mid = None, None
+        self.rec, self.rec_mid, self.rec_name = None, None, ""
         try:
             final = rec.stop()
             dur = pipeline.probe_duration(pipeline.Path(final)) if os.path.exists(final) else rec.elapsed
@@ -651,9 +669,7 @@ class Bridge(NSObject):
         panel.setCanChooseDirectories_(False)
         panel.setAllowsMultipleSelection_(False)
         panel.setTitle_("Import a recording to transcribe")
-        panel.setAllowedFileTypes_([
-            "wav", "mp3", "m4a", "aac", "aif", "aiff", "flac", "ogg", "oga",
-            "opus", "caf", "wma", "mp4", "mov", "m4v", "webm", "mkv", "3gp"])
+        panel.setAllowedFileTypes_(list(MEDIA_EXTS))
         if panel.runModal() == 1:
             self._import_path(panel.URLs()[0].path())
 
@@ -661,6 +677,10 @@ class Bridge(NSObject):
     def _import_path(self, path):
         if not path or not os.path.exists(path):
             self._toast("File not found", "warn")
+            return
+        ext = os.path.splitext(path)[1].lstrip(".").lower()
+        if ext not in MEDIA_EXTS:
+            self._toast(f"“{os.path.basename(path)}” isn't an audio or video file", "warn")
             return
         if self.tx_mid or self.rec is not None:
             self._toast("Busy — finish the current task first", "warn")
@@ -823,6 +843,56 @@ class Bridge(NSObject):
             self._toast("Not found", "warn")
             return
         subprocess.Popen(["open", path])
+
+    @objc.python_method
+    def _rename(self, mid, name):
+        """Rename a meeting — its display name and the folder it's saved in.
+
+        Renaming the in-progress recording is explicitly supported: the folder
+        moves out from under the open WAV handles (which keep writing into it),
+        and the engine is repointed so the mixdown at stop lands in the renamed
+        session. A meeting that a *subprocess* is writing into (transcribing,
+        importing) or one already being finalized can't move, so those wait.
+        """
+        root = self.cfg["library"]
+        name = library.clean_name(name)
+        if not mid:
+            return
+        if not name:
+            self._toast("A meeting needs a name", "warn")
+            self._push_meetings()
+            return
+        meta = library.read_meta(root, mid)
+        if not meta:
+            self._toast("That meeting no longer exists", "warn")
+            self._push_meetings()
+            return
+        if name == (meta.get("name") or ""):
+            self._push_meetings()          # no-op: just resync the row
+            return
+
+        live = (mid == self.rec_mid and self.rec is not None and not self._stopping)
+        if (mid == self.tx_mid or meta.get("status") == library.IMPORTING
+                or (mid == self.rec_mid and not live)):
+            self._toast("That meeting is busy — rename it once it finishes.", "warn")
+            self._push_meetings()
+            return
+
+        try:
+            new_mid = library.rename_meeting(root, mid, name)
+        except (OSError, ValueError) as e:
+            self._toast(f"Rename failed: {e}", "err")
+            self._push_meetings()
+            return
+
+        if live:
+            self.rec.relocate(library.folder(root, new_mid))
+            self.rec_mid = new_mid
+            self.rec_name = name
+        self._toast(f"Renamed to “{name}”" + (" — the recording follows" if live else ""),
+                    "ok")
+        self._push_state()
+        self._push_meetings()
 
     @objc.python_method
     def _delete(self, mid):

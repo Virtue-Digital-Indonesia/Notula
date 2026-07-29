@@ -35,7 +35,14 @@ button and a library in front of it.
    mp4, mkv, aac, …
 3. **Save** — every meeting is its own folder in your library, with the
    recording and a `meta.json`.
-4. **Transcribe** — a small dialog lets you set language + speaker count per
+4. **Rename** — hit **✎** on any meeting (or double-click its name). The display
+   name *and* the folder on disk both change; the `YYYY-MM-DD_HHMM_` prefix
+   stays, so the library keeps sorting newest-first. You can rename **while
+   recording** — type in the *Meeting name* field and press Enter, and the
+   session being written follows the new name. A meeting that ffmpeg/whisper is
+   currently writing into (importing, transcribing, finishing a stop) waits
+   until it's done.
+5. **Transcribe** — a small dialog lets you set language + speaker count per
    meeting, then runs `whisper-cli` (large-v3, VAD, your flags) + `pyannote`
    speaker diarization, and writes `output.txt` — the merged, speaker-labeled
    transcript. Progress streams into the UI. If diarization can't run (no token,
@@ -77,7 +84,7 @@ Two Python environments — this is deliberate:
 ./.venv/bin/pip install py2app          # once
 ./.venv/bin/python tools/make_icns.py   # regenerate the icon (once / on icon change)
 ./.venv/bin/python setup.py py2app      # -> dist/Notula.app  (launches as "Notula")
-./tools/build_dmg.sh                    # -> dist/Notula-1.0.dmg (drag to Applications)
+./tools/build_dmg.sh                    # -> dist/Notula-1.2.dmg (drag to Applications)
 ```
 
 Verify the bundle's whole AI pipeline (whisper + diarize) without the GUI:

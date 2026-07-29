@@ -45,6 +45,15 @@ def _slug(name: str) -> str:
     return s[:48] or "meeting"
 
 
+def clean_name(name: str) -> str:
+    """The canonical form of a meeting name: whitespace collapsed, length capped."""
+    return " ".join((name or "").split())[:80]
+
+
+# a meeting id is "<YYYY-MM-DD_HHMM>_<slug>" — the prefix is what sorts the library
+_ID_STAMP = re.compile(r"^(\d{4}-\d{2}-\d{2}_\d{4})_")
+
+
 def ensure_root(root: str) -> str:
     os.makedirs(root, exist_ok=True)
     return root
@@ -127,7 +136,7 @@ def create_meeting(root: str, name: str, device_name: str = "") -> str:
     os.makedirs(folder(root, mid), exist_ok=True)
     write_meta(root, mid, {
         "id": mid,
-        "name": name.strip() or "Untitled meeting",
+        "name": clean_name(name) or "Untitled meeting",
         "created": now.isoformat(timespec="seconds"),
         "device": device_name,
         "status": RECORDING,
@@ -136,6 +145,48 @@ def create_meeting(root: str, name: str, device_name: str = "") -> str:
         "warning": None,
     })
     return mid
+
+
+def rename_meeting(root: str, mid: str, name: str) -> str:
+    """Rename a meeting: update meta['name'] *and* move the folder so the saved
+    session on disk carries the new name. Returns the (possibly new) id.
+
+    The timestamp prefix is kept, so the library keeps sorting newest-first and
+    the meeting's identity in time is preserved.
+
+    This is safe to do while a recording is in flight: renaming a directory
+    moves the inode, and already-open WAV handles keep writing into it. The
+    caller only has to repoint the paths it will use *later* — see
+    recorder.RecordingEngine.relocate().
+    """
+    name = clean_name(name)
+    if not name:
+        raise ValueError("a meeting needs a name")
+    src = folder(root, mid)
+    if not os.path.isdir(src):
+        raise FileNotFoundError(f"no such meeting: {mid}")
+
+    m = _ID_STAMP.match(mid)
+    stamp = m.group(1) if m else datetime.now().strftime("%Y-%m-%d_%H%M")
+    new_mid = base = f"{stamp}_{_slug(name)}"
+    n = 2
+    while True:
+        dst = folder(root, new_mid)
+        if not os.path.exists(dst):
+            break
+        try:
+            # the same folder — either nothing moved, or it's a case-only change
+            # that a case-insensitive volume reports as already existing
+            if os.path.samefile(dst, src):
+                break
+        except OSError:
+            pass
+        new_mid, n = f"{base}-{n}", n + 1
+
+    if new_mid != mid:
+        os.rename(src, folder(root, new_mid))
+    update_meta(root, new_mid, id=new_mid, name=name)
+    return new_mid
 
 
 def _fmt_duration(sec) -> str:

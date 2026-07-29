@@ -187,9 +187,15 @@ a{color:var(--link);}
 .mrow{display:flex; align-items:center; gap:12px; background:var(--layer); padding:11px 4px;}
 .minfo{flex:1; min-width:0;}
 .mname{font-size:13.5px; color:var(--text); font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+.mname.editable{cursor:text;}
+.nameedit{width:100%; max-width:340px; background:var(--field); color:var(--text);
+  border:0; border-bottom:1px solid var(--primary); border-radius:0;
+  font-family:inherit; font-size:13.5px; font-weight:600; letter-spacing:.16px;
+  height:30px; padding:0 10px; -webkit-appearance:none;}
+.nameedit:focus{outline:2px solid var(--primary); outline-offset:-2px;}
 .mmeta{font-size:11.5px; color:var(--text-help); margin-top:2px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;}
 .mmeta .dotsep{opacity:.5;}
-.mactions{display:flex; align-items:center; gap:6px; flex:0 0 auto;}
+.mactions{display:flex; align-items:center; justify-content:flex-end; gap:6px; flex:0 1 auto; flex-wrap:wrap;}
 .mprog{flex:0 0 200px; min-width:160px;}
 .mempty{color:var(--text-help); font-size:12.5px; padding:14px 4px; text-align:center;}
 .iconbtn{background:transparent; border:1px solid var(--border-strong); color:var(--text-2);
@@ -271,7 +277,8 @@ a{color:var(--link);}
 
       <div class="f full">
         <label>Meeting name</label>
-        <div class="inp"><input id="meeting_name" placeholder="Weekly sync" maxlength="80"></div>
+        <div class="inp"><input id="meeting_name" placeholder="Weekly sync" maxlength="80" onchange="onNameCommit()"></div>
+        <span class="help" id="name_help">Optional — you can rename it later from the list below.</span>
       </div>
 
       <!-- source: microphone -->
@@ -327,7 +334,7 @@ a{color:var(--link);}
         <span id="meet_count" class="tag">0</span>
       </div>
     </div>
-    <div class="sub">Record a meeting, or <b>drag an audio/video file onto the window or the Dock icon</b> (mov, mp4, m4a, mp3, …) — it's converted to audio and added here, ready to transcribe.</div>
+    <div class="sub">Record a meeting, or <b>drag an audio/video file onto the window or the Dock icon</b> (mov, mp4, m4a, mp3, …) — it's converted to audio and added here, ready to transcribe. Double-click a name (or hit <b>✎</b>) to rename a session and its folder.</div>
     <div id="mlist" class="mlist"></div>
   </section>
 
@@ -394,10 +401,14 @@ function esc(s){ return (s==null?'':String(s)); }
 
 var STATE = {recording:false, txId:null};
 var MEETINGS = [];
+var EDIT = null;          /* inline rename in progress: {id, value} */
+var RENDERING = false;    /* re-render tearing down the editor — not a real blur */
+var FOCUS_NEXT = null;
 var MUTED = {mic:false, system:false};
 var WAVE = {mic:[], system:[]};
 var WN = 64;
 var WAS_ACTIVE = false;
+var WAS_REC = false;
 
 function syncMute(kind, muted){
   MUTED[kind] = !!muted;
@@ -517,6 +528,19 @@ window.notulaState = function(st){
   $('recmeta').textContent = st.recmeta||'';
   setTag($('rec_tag'), st.recTag||'Idle', st.recTagKind||'');
 
+  /* keep the name field honest with what's actually being recorded (never
+     while the user is typing in it) */
+  var nm=$('meeting_name');
+  if(nm && document.activeElement!==nm){
+    if(st.recording && st.recName!=null) nm.value=st.recName;
+    else if(WAS_REC) nm.value='';        /* saved — the field is for the next one */
+  }
+  WAS_REC = st.recording;
+  var nh=$('name_help');
+  if(nh) nh.textContent = st.recording
+    ? 'Renaming now also renames the session being recorded — press Enter to apply.'
+    : 'Optional — you can rename it later from the list below.';
+
   var b=$('rec_btn'), lbl=$('rec_label');
   if(st.recording){ b.className='btn btn-secondary recbtn rec'; lbl.textContent='Stop'; b.disabled=false; }
   else { b.className='btn btn-danger recbtn'; lbl.textContent='Record'; b.disabled=!st.canRecord; }
@@ -541,11 +565,53 @@ window.notulaState = function(st){
 
 window.notulaMeetings = function(list){
   MEETINGS = list||[];
-  var wrap=$('mlist'); wrap.innerHTML='';
-  setTag($('meet_count'), String(MEETINGS.length), MEETINGS.length?'info':'');
-  if(!MEETINGS.length){ var e=document.createElement('div'); e.className='mempty'; e.textContent='No meetings yet — record one above.'; wrap.appendChild(e); return; }
-  MEETINGS.forEach(function(m){ wrap.appendChild(renderRow(m)); });
+  /* an edit only survives if its row is still there (a rename changes the id) */
+  if(EDIT && !MEETINGS.some(function(m){ return m.id===EDIT.id; })) EDIT=null;
+  RENDERING = true;
+  try{
+    var wrap=$('mlist'); wrap.innerHTML='';
+    setTag($('meet_count'), String(MEETINGS.length), MEETINGS.length?'info':'');
+    if(!MEETINGS.length){ var e=document.createElement('div'); e.className='mempty'; e.textContent='No meetings yet — record one above.'; wrap.appendChild(e); }
+    else { MEETINGS.forEach(function(m){ wrap.appendChild(renderRow(m)); }); }
+  } finally { RENDERING = false; }
+  if(FOCUS_NEXT){
+    var el=FOCUS_NEXT; FOCUS_NEXT=null; el.focus();
+    /* a push that lands mid-edit rebuilds the input — put the caret back where
+       it was instead of re-selecting and eating the next keystroke */
+    if(EDIT && EDIT.caret!=null){ try{ el.setSelectionRange(EDIT.caret, EDIT.caret); }catch(e){ el.select(); } }
+    else el.select();
+  }
 };
+
+/* ── inline rename ── */
+function renameable(m){ return m.status!=='transcribing' && m.status!=='importing'; }
+
+function beginEdit(id, current){
+  var m = MEETINGS.filter(function(x){ return x.id===id; })[0];
+  if(m && !renameable(m)){ showToast('That meeting is busy — rename it once it finishes.','warn'); return; }
+  EDIT = {id:id, value:current||'', orig:current||''};
+  notulaMeetings(MEETINGS);
+}
+function endEdit(commit){
+  if(RENDERING || !EDIT) return;
+  var e=EDIT; EDIT=null;
+  var v=(e.value||'').replace(/\s+/g,' ').trim();
+  notulaMeetings(MEETINGS);              /* the authoritative list follows from Python */
+  if(commit && v && v!==e.orig) post('rename',{id:e.id, name:v});
+}
+function makeEditor(){
+  var inp=document.createElement('input');
+  inp.className='nameedit'; inp.type='text'; inp.maxLength=80; inp.value=EDIT.value;
+  inp.setAttribute('aria-label','Meeting name');
+  inp.oninput=function(){ if(EDIT){ EDIT.value=inp.value; EDIT.caret=inp.selectionStart; } };
+  inp.onkeydown=function(ev){
+    if(ev.key==='Enter'){ ev.preventDefault(); endEdit(true); }
+    else if(ev.key==='Escape'){ ev.preventDefault(); ev.stopPropagation(); endEdit(false); }
+  };
+  inp.onblur=function(){ endEdit(true); };
+  FOCUS_NEXT = inp;
+  return inp;
+}
 
 var STATUS_TAG = {
   recording:['Recording','err'], importing:['Importing','warn'], recorded:['Recorded','info'],
@@ -556,7 +622,16 @@ function renderRow(m){
   var row=document.createElement('div'); row.className='mrow'; row.id='m_'+m.id;
 
   var info=document.createElement('div'); info.className='minfo';
-  var name=document.createElement('div'); name.className='mname'; name.textContent=m.name; info.appendChild(name);
+  if(EDIT && EDIT.id===m.id){
+    info.appendChild(makeEditor());
+  } else {
+    var name=document.createElement('div'); name.className='mname'; name.textContent=m.name;
+    if(renameable(m)){
+      name.className='mname editable'; name.title='Double-click to rename';
+      name.ondblclick=function(){ beginEdit(m.id, m.name); };
+    }
+    info.appendChild(name);
+  }
   var meta=document.createElement('div'); meta.className='mmeta';
   var st=STATUS_TAG[m.status]||[m.status,''];
   var parts=[m.created, m.duration];
@@ -606,6 +681,11 @@ function renderRow(m){
   }
   var rb=document.createElement('button'); rb.className='iconbtn'; rb.textContent='Reveal'; rb.title='Show in Finder';
   rb.onclick=function(){ post('reveal',{id:m.id}); }; acts.appendChild(rb);
+  /* rename stays available while another meeting records or transcribes — it
+     only touches this meeting's own folder */
+  var nb=document.createElement('button'); nb.className='iconbtn'; nb.textContent='✎';
+  nb.title='Rename meeting (and its folder)'; nb.setAttribute('aria-label','Rename meeting');
+  nb.onclick=function(){ beginEdit(m.id, m.name); }; acts.appendChild(nb);
   var db=document.createElement('button'); db.className='iconbtn danger'; db.textContent='✕'; db.title='Delete meeting';
   db.disabled = busy; db.onclick=function(){ post('delete',{id:m.id}); }; acts.appendChild(db);
   row.appendChild(acts);
@@ -613,6 +693,18 @@ function renderRow(m){
 }
 
 function onRecord(){ post(STATE.recording?'stopRecording':'startRecording',{name:($('meeting_name')||{}).value||''}); }
+
+/* While recording, this field renames the live session: the meeting folder is
+   moved and the WAV still being written follows it. */
+function onNameCommit(){
+  var n=$('meeting_name'); if(!n || !STATE.recording || !STATE.recId) return;
+  var v=(n.value||'').replace(/\s+/g,' ').trim();
+  if(!v){ n.value=STATE.recName||''; return; }     /* can't un-name a live session */
+  if(v!==STATE.recName) post('rename',{id:STATE.recId, name:v});
+}
+(function(){ var n=$('meeting_name');
+  if(n) n.addEventListener('keydown', function(e){ if(e.key==='Enter'){ e.preventDefault(); n.blur(); } });
+})();
 
 function toggleSettings(){
   var p=$('settings_panel'), g=$('gear');
