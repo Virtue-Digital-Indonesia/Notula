@@ -51,6 +51,7 @@ import pipeline
 import permissions
 import sysaudio
 import appicon
+import live
 
 HANDLER = "notula"   # must match window.webkit.messageHandlers.<name> in the HTML
 
@@ -143,6 +144,11 @@ class Bridge(NSObject):
         self.rec_name = ""
         self.rec_seq = 0        # bumped per recording; survives a mid-flight rename
         self._stopping = False
+        self.live = None        # LiveTranscriber while it's running
+        self._live_status = ""
+        self._live_lines = []   # committed lines shown/saved (survives model switches)
+        self._live_base = []    # lines from earlier transcriber instances
+        self._live_pending = ""
         self.tx_mid = None
         self._tx_progress = None
         self._tx_proc = None
@@ -313,7 +319,10 @@ class Bridge(NSObject):
                 "auto_transcribe": self.cfg["auto_transcribe"],
                 "hf_ok": bool(token),
                 "hf_token_masked": ("•" * 12) if self.cfg.get("hf_token") else "",
+                "live_enabled": bool(self.cfg.get("live_enabled")),
+                "live_model": self.cfg.get("live_model") or live.DEFAULT_MODEL,
             },
+            "live_models": live.available_models(),
             "inputs": self._devices,
             "mic_selected": self.mic_idx,
             "system_capture": self.system_on,
@@ -328,13 +337,15 @@ class Bridge(NSObject):
     @objc.python_method
     def _push_state(self):
         recording = self.rec is not None and self.rec.running
+        paused = recording and self.rec.paused
         monitoring = self.monitor is not None
         elapsed = self.rec.elapsed if self.rec else 0.0
         sources = self._device_name(self.mic_idx) + ("  +  computer audio" if self.system_on else "")
         if recording:
-            header = f"Recording  {fmt_elapsed(elapsed)}"
-            rec_tag, rec_kind = "Recording", "err"
-            recmeta = sources
+            header = f"{'Paused' if paused else 'Recording'}  {fmt_elapsed(elapsed)}"
+            rec_tag, rec_kind = ("Paused", "warn") if paused else ("Recording", "err")
+            recmeta = ("Paused — this time is left out of the recording"
+                       if paused else sources)
         elif monitoring:
             header = "Testing input…"
             rec_tag, rec_kind = "Testing", "info"
@@ -349,6 +360,7 @@ class Bridge(NSObject):
             recmeta = "Ready to record" if self.mic_idx is not None else "No microphone found"
         self._js("notulaState", {
             "recording": recording,
+            "paused": paused,
             "monitoring": monitoring,
             "elapsed": fmt_elapsed(elapsed),
             "canRecord": (not recording and not monitoring and not self.tx_mid and self.mic_idx is not None),
@@ -356,6 +368,13 @@ class Bridge(NSObject):
             "txId": self.tx_mid,
             "recId": self.rec_mid if recording else None,
             "recName": self.rec_name if recording else None,
+            "live": {
+                "on": bool(self.cfg.get("live_enabled")),
+                "running": self.live is not None,
+                "ready": bool(self.live is not None and self.live.ready),
+                "status": self._live_status,
+                "model": self.cfg.get("live_model") or live.DEFAULT_MODEL,
+            },
             "progress": self._tx_progress,
             "header": header,
             "recTag": rec_tag,
@@ -412,6 +431,14 @@ class Bridge(NSObject):
             self._start_recording(str(body.get("name") or ""))
         elif action == "stopRecording":
             self._stop_recording()
+        elif action == "togglePause":
+            self._toggle_pause()
+        elif action == "setLive":
+            self._set_live(bool(body.get("value")))
+        elif action == "setLiveModel":
+            self._set_live_model(str(body.get("value") or ""))
+        elif action == "copyLive":
+            self._copy_live()
         elif action == "transcribe":
             self._transcribe(str(body.get("id") or ""),
                              lang=body.get("lang"),
@@ -535,6 +562,10 @@ class Bridge(NSObject):
         self.rec_mid = mid
         self.rec_name = library.read_meta(root, mid).get("name") or ""
         self.rec_seq += 1
+        self._live_lines, self._live_base, self._live_pending = [], [], ""
+        self._push_live()
+        if self.cfg.get("live_enabled"):
+            self._start_live()
         self._push_state()
         self._push_meetings()
         # confirm audio is actually flowing (mic TCC / device busy) off the main thread
@@ -566,11 +597,30 @@ class Bridge(NSObject):
         self._push_state()
 
     @objc.python_method
+    def _toggle_pause(self):
+        """Pause/resume the running recording. Paused time is dropped at the
+        capture callback, so it's absent from audio.wav and the timer freezes —
+        as opposed to Mute, which records silence and keeps the timeline."""
+        if self.rec is None or self.rec_mid is None or self._stopping:
+            return
+        if not self.rec.running:
+            return
+        paused = not self.rec.paused
+        self.rec.set_paused(paused)
+        library.update_meta(self.cfg["library"], self.rec_mid,
+                            status=library.PAUSED if paused else library.RECORDING)
+        self._toast("Paused — nothing is being recorded until you resume" if paused
+                    else "Recording again", "warn" if paused else "ok")
+        self._push_state()
+        self._push_meetings()
+
+    @objc.python_method
     def _stop_recording(self):
         if self.rec is None or self.rec_mid is None or self._stopping:
             return
         self._stopping = True
         rec, mid = self.rec, self.rec_mid
+        self._stop_live(mid)      # detaches the tap and writes live.txt off-thread
         self._toast("Finishing recording…")
         threading.Thread(target=self._do_stop, args=(rec, mid), daemon=True).start()
 
@@ -601,6 +651,7 @@ class Bridge(NSObject):
         """A capture stream ended on its own (device unplugged/seized). Salvage
         whatever was written and settle the UI instead of wedging."""
         rec, mid = self.rec, self.rec_mid
+        self._stop_live(mid)
         self.rec, self.rec_mid, self.rec_name = None, None, ""
         try:
             final = rec.stop()
@@ -616,6 +667,146 @@ class Bridge(NSObject):
                     else "Recording lost — input device stopped",
                     "warn" if saved else "err")
         self._push_meetings()
+
+    # ---- live transcription (optional, toggleable at any time) ----
+
+    @objc.python_method
+    def _start_live(self):
+        """Attach the live tier to the running recording. Best-effort: any
+        failure reports through _live_status_cb and leaves recording alone."""
+        if self.live is not None or self.rec is None or not self.rec.running:
+            return
+        key = live.resolve_model(self.cfg.get("live_model") or live.DEFAULT_MODEL)
+        if key != self.cfg.get("live_model"):
+            self.cfg["live_model"] = key          # requested model isn't installed
+            config.save(self.cfg)
+        lt = live.LiveTranscriber(
+            key, self.cfg["lang"],
+            on_update=lambda lines, pend: AppHelper.callAfter(self._live_update, lines, pend),
+            on_status=lambda kind, msg: AppHelper.callAfter(self._live_status_cb, kind, msg),
+            # You/Them comes from the energy split between the two capture
+            # sources, so it's only meaningful when both are actually running.
+            attribute=bool(self.system_on),
+        )
+        self.live = lt
+        lt.start()
+        self.rec.set_tap(lt.feed)   # buffers while the model loads — no lost audio
+        self._push_state()
+
+    @objc.python_method
+    def _stop_live(self, mid=None):
+        """Detach the live tier and persist live.txt off the main thread."""
+        lt, self.live = self.live, None
+        if lt is None:
+            return
+        if self.rec is not None:
+            try:
+                self.rec.set_tap(None)
+            except Exception:
+                pass
+        self._live_base = list(self._live_lines)   # survive a model switch
+        self._live_status = ""
+        # snapshot the lines for the writer: starting another recording resets
+        # _live_lines on the main thread, and this thread outlives that
+        threading.Thread(target=self._finish_live,
+                         args=(lt, mid, list(self._live_lines)), daemon=True).start()
+
+    @objc.python_method
+    def _finish_live(self, lt, mid, lines):
+        try:
+            lt.stop()
+        except Exception:
+            pass
+        if not mid:
+            return
+        text = "\n".join(l["text"] if not l.get("who") else f"{l['who']}: {l['text']}"
+                         for l in lines if (l.get("text") or "").strip())
+        if not text.strip():
+            return
+        try:
+            with open(library.path(self.cfg["library"], mid, library.LIVE),
+                      "w", encoding="utf-8") as fh:
+                fh.write(text + "\n")
+        except OSError:
+            pass
+
+    @objc.python_method
+    def _live_update(self, lines, pending):        # main thread
+        self._live_lines = self._live_base + list(lines)
+        self._live_pending = pending
+        self._push_live()
+
+    @objc.python_method
+    def _live_status_cb(self, kind, msg):          # main thread
+        self._live_status = msg or ""
+        if kind == "error":
+            self._toast(f"Live transcript unavailable: {msg}", "warn")
+            self.live = None
+        self._push_state()
+
+    @objc.python_method
+    def _push_live(self):
+        # its own channel: the transcript changes on the live tier's cadence, not
+        # the 2 Hz UI heartbeat, and re-sending it at 2 Hz would be wasteful
+        self._js("notulaLive", {
+            "lines": self._live_lines[-80:],
+            "pending": self._live_pending,
+            "total": len(self._live_lines),
+        })
+
+    @objc.python_method
+    def _set_live(self, on):
+        self.cfg["live_enabled"] = bool(on)
+        config.save(self.cfg)
+        if on:
+            if self.rec is not None and self.rec.running:
+                if self.live is None:
+                    self._start_live()
+            else:
+                self._toast("Live transcript on — it starts with your next recording",
+                            "info")
+        else:
+            if self.live is not None:
+                self._stop_live(self.rec_mid)
+                self._toast("Live transcript off — the recording is unaffected", "info")
+        self._push_state()
+
+    @objc.python_method
+    def _set_live_model(self, key):
+        if key not in live.MODELS:
+            return
+        p = live.model_path(key)
+        if not p or not p.exists():
+            self._toast(f"{live.MODELS[key]['label']} isn't installed — download "
+                        f"{live.MODELS[key]['file']} into the whisper-cpp models "
+                        f"folder first.", "warn")
+            self._push_init()
+            return
+        if key == self.cfg.get("live_model"):
+            return
+        self.cfg["live_model"] = key
+        config.save(self.cfg)
+        self._push_init()
+        if self.live is not None:      # restart on the new model, keeping the text
+            self._stop_live(None)
+            self._toast(f"Switching live model to "
+                        f"{live.MODELS[key]['label'].split(' —')[0]}…", "info")
+            AppHelper.callAfter(self._start_live)
+        self._push_state()
+
+    @objc.python_method
+    def _copy_live(self):
+        text = "\n".join(l["text"] if not l.get("who") else f"{l['who']}: {l['text']}"
+                         for l in self._live_lines if (l.get("text") or "").strip())
+        if self._live_pending:
+            text = (text + "\n" + self._live_pending).strip()
+        if not text:
+            self._toast("Nothing transcribed yet", "warn")
+            return
+        pb = NSPasteboard.generalPasteboard()
+        pb.clearContents()
+        pb.setString_forType_(text, NSPasteboardTypeString)
+        self._toast("Live transcript copied", "ok")
 
     # ---- input monitor (test devices without recording) ----
 
@@ -1032,6 +1223,12 @@ class Bridge(NSObject):
         self._torn = True
         if self._nstimer is not None:
             self._nstimer.invalidate()
+        lt, self.live = self.live, None      # don't orphan whisper-server on quit
+        if lt is not None:
+            try:
+                lt.stop(timeout=2.0)
+            except Exception:
+                pass
         if self.monitor is not None:
             try:
                 self.monitor.stop_streams()

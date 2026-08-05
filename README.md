@@ -28,6 +28,12 @@ button and a library in front of it.
    see it's capturing, and a **Mute** button you can toggle mid-meeting. Manual
    start/stop, live timer. Multiple sources are mixed on stop.
    **Test input** previews the meters live without recording.
+   **Pause** drops audio at the capture callback, so paused time never reaches
+   the file and the timer freezes with it — as opposed to **Mute**, which
+   records silence and keeps the timeline. (The devices stay open while paused:
+   re-acquiring a mic or restarting a ScreenCaptureKit stream mid-meeting can
+   fail, and a pause that can't resume is worse than one that keeps the device
+   warm. The meters keep moving so you can see the input is still alive.)
 2. **Import** — already have a recording (incl. OBS `.mov`/`.mp4`)? **Drop it on
    the window or the Dock icon** (or *Import audio…*, or Open With ▸ Notula). It's
    converted to 16 kHz mono with ffmpeg and added to your library, ready to
@@ -42,7 +48,24 @@ button and a library in front of it.
    session being written follows the new name. A meeting that ffmpeg/whisper is
    currently writing into (importing, transcribing, finishing a stop) waits
    until it's done.
-5. **Transcribe** — a small dialog lets you set language + speaker count per
+5. **Live transcript** *(optional)* — flip it on and text appears while you're
+   still recording, roughly a second behind. **Toggle it on or off at any
+   moment**, including mid-meeting; it never touches the recording, and if it
+   fails the meeting is unaffected. Pick the model against the trade-off shown
+   under the selector:
+
+   | model | behind | trade-off |
+   |---|---|---|
+   | Small | ~0.8 s | keeps up almost word-for-word, but mangles names and loan-words |
+   | **Turbo** | ~2.1 s | **recommended** — words match the final transcript, shorter choppier lines |
+   | Large-v3 | ~3.1 s | same model as the final pass, slowest and heaviest on battery |
+
+   Grey italic text is provisional and still being revised; plain text has been
+   agreed by two consecutive windows and won't change again. When both audio
+   sources are live, lines are labelled **You** / **Them** from the energy split
+   between mic and computer audio — no diarization model involved. The rolling
+   text is saved as `live.txt` next to the recording.
+6. **Transcribe** — a small dialog lets you set language + speaker count per
    meeting, then runs `whisper-cli` (large-v3, VAD, your flags) + `pyannote`
    speaker diarization, and writes `output.txt` — the merged, speaker-labeled
    transcript. Progress streams into the UI. If diarization can't run (no token,
@@ -59,7 +82,19 @@ Homebrew tools (you already have these from `transcribe.sh`):
 ```bash
 brew install ffmpeg whisper-cpp
 # models at $(brew --prefix)/share/whisper-cpp/models/:
-#   ggml-large-v3.bin, ggml-silero-v6.2.0.bin
+#   ggml-large-v3.bin, ggml-silero-v6.2.0.bin        # the final transcript
+#   ggml-large-v3-turbo.bin, ggml-small.bin          # optional, for live transcript
+```
+
+The live-transcript models are optional — the menu greys out whatever isn't
+installed and tells you which file to fetch:
+
+```bash
+M=$(brew --prefix)/share/whisper-cpp/models
+curl -L -o "$M/ggml-large-v3-turbo.bin" \
+  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin
+curl -L -o "$M/ggml-small.bin" \
+  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin
 ```
 
 Two Python environments — this is deliberate:
@@ -84,7 +119,7 @@ Two Python environments — this is deliberate:
 ./.venv/bin/pip install py2app          # once
 ./.venv/bin/python tools/make_icns.py   # regenerate the icon (once / on icon change)
 ./.venv/bin/python setup.py py2app      # -> dist/Notula.app  (launches as "Notula")
-./tools/build_dmg.sh                    # -> dist/Notula-1.2.dmg (drag to Applications)
+./tools/build_dmg.sh                    # -> dist/Notula-1.3.dmg (drag to Applications)
 ```
 
 Verify the bundle's whole AI pipeline (whisper + diarize) without the GUI:
@@ -130,6 +165,7 @@ Each meeting folder (`~/Documents/Notula/<date>_<name>/`):
 | `transcript.json` | whisper raw output |
 | `transcript.txt` | plain transcript |
 | `transcript.merged.txt` | speaker-labeled transcript |
+| `live.txt` | the live preview, if it was on (never the deliverable) |
 | **`output.txt`** | **the canonical file** — merged transcript + a small `#` header |
 
 `output.txt`'s header lines start with `#`, so downstream tooling can strip them
@@ -144,6 +180,7 @@ app's Settings panel:
 - **Min/Max speakers** — `0` = auto-detect
 - **HuggingFace token** — needed for pyannote diarization. Also read from
   `$HF_TOKEN` if set. Without it, meetings still transcribe (plain text only).
+- **Live transcript** — on/off and which model; see *What it does*
 - **Library folder** — where meeting folders are created
 
 ## The two audio sources

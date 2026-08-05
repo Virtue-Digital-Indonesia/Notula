@@ -34,6 +34,8 @@ DEFAULTS = {
     "max_speakers": 0,               # 0 = auto-detect
     "auto_transcribe": False,        # transcribe automatically when a recording stops
     "hf_token": "",                  # HuggingFace token for pyannote (or set $HF_TOKEN)
+    "live_enabled": False,           # live transcript while recording (toggle any time)
+    "live_model": "large-v3-turbo",  # which model the live tier uses (see live.MODELS)
     "theme": "auto",                 # auto | light | dark
     "heartbeat_s": 0.5,              # UI refresh interval
 }
@@ -86,7 +88,7 @@ def _sanitize(cfg: dict) -> dict:
         except (TypeError, ValueError):
             cfg["mic_device"] = None
 
-    for k in ("library", "lang", "model", "hf_token"):
+    for k in ("library", "lang", "model", "hf_token", "live_model"):
         if not isinstance(cfg.get(k), str):
             cfg[k] = DEFAULTS[k]
     cfg["library"] = os.path.expanduser(cfg["library"].strip() or DEFAULTS["library"])
@@ -94,6 +96,7 @@ def _sanitize(cfg: dict) -> dict:
 
     cfg["auto_transcribe"] = bool(cfg.get("auto_transcribe"))
     cfg["system_capture"] = bool(cfg.get("system_capture"))
+    cfg["live_enabled"] = bool(cfg.get("live_enabled"))
     return cfg
 
 

@@ -80,6 +80,8 @@ class SCKSystemAudioSource:
     def __init__(self, wav_path: str, write: bool = True):
         self.wav_path = wav_path
         self.muted = False
+        self.paused = False     # see recorder.Source: metered, but not written
+        self.tap = None         # fn(kind, block) — feeds live transcription
         self.level = 0.0
         self.frames = 0
         self._write = write
@@ -108,12 +110,20 @@ class SCKSystemAudioSource:
             rms = float(np.sqrt(np.mean(mono * mono)))
             lvl = _rms_to_level(rms)
             self.level = lvl if lvl > self.level else self.level * 0.82 + lvl * 0.18
+            if self.paused:
+                return          # dropped, so paused time is absent from the WAV
             block = np.zeros_like(mono) if self.muted else mono
             with self._lock:
                 if self._wav is not None:
                     pcm = np.clip(block * 32767.0, -32768, 32767).astype("<i2")
                     self._wav.writeframes(pcm.tobytes())
             self.frames += len(mono)
+            tap = self.tap                           # live transcription, best-effort
+            if tap is not None:
+                try:
+                    tap(self.kind, block)
+                except Exception:
+                    pass
         except Exception as e:                       # never let the audio thread die
             self.error = repr(e)
 

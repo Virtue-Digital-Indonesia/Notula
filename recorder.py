@@ -96,9 +96,11 @@ class Source:
         self.device_index = int(device_index)
         self.wav_path = wav_path
         self.muted = False
+        self.paused = False     # dropped at the callback — never reaches the WAV
         self.level = 0.0        # smoothed 0..1 for the meter
         self.frames = 0         # samples seen (drives elapsed)
         self._write = write     # False = monitor only (levels, no file)
+        self.tap = None         # optional fn(kind, block) — feeds live transcription
         self._q: queue.Queue = queue.Queue(maxsize=64)
         self._stream = None
         self._writer = None
@@ -113,6 +115,12 @@ class Source:
         lvl = _rms_to_level(rms)
         # fast attack, slow release — reads like a VU meter
         self.level = lvl if lvl > self.level else self.level * 0.82 + lvl * 0.18
+        # Paused: keep metering (the device is still open, and seeing the meter
+        # move tells you it's alive) but drop the audio. Unlike Mute — which
+        # writes silence and keeps the timeline — paused time is simply absent
+        # from the recording, so `frames`/elapsed freeze with it.
+        if self.paused:
+            return
         block = np.zeros_like(mono) if self.muted else mono
         try:
             self._q.put_nowait(block.copy())
@@ -129,6 +137,16 @@ class Source:
                 pcm = np.clip(block * 32767.0, -32768, 32767).astype("<i2")
                 self._wav.writeframes(pcm.tobytes())
             self.frames += len(block)
+            # Live transcription taps here, on the writer thread, deliberately —
+            # never on the audio callback, where a slow consumer would cost frames.
+            # Paused blocks never arrive (dropped upstream) and muted ones arrive
+            # as silence, so the live tier inherits both semantics for free.
+            tap = self.tap
+            if tap is not None:
+                try:
+                    tap(self.kind, block)
+                except Exception:
+                    pass
 
     def start(self):
         if self._write:
@@ -231,6 +249,24 @@ class RecordingEngine:
             if src.kind == kind:
                 src.muted = bool(muted)
 
+    @property
+    def paused(self) -> bool:
+        return bool(self.sources) and all(src.paused for src in self.sources)
+
+    def set_paused(self, paused: bool) -> None:
+        """Pause/resume every source at once.
+
+        Paused audio is dropped in the capture callback, so it never lands on
+        disk — the recording holds only the time you were actually recording,
+        and the elapsed clock (driven by frames written) freezes with it. The
+        streams stay open: re-acquiring a mic or restarting a ScreenCaptureKit
+        stream mid-meeting can fail (device seized, permission re-check), and a
+        pause that can't resume is worse than one that keeps the device warm.
+        """
+        paused = bool(paused)
+        for src in self.sources:
+            src.paused = paused
+
     def relocate(self, new_folder: str) -> None:
         """Point the engine at a folder that was renamed underneath it.
 
@@ -242,6 +278,12 @@ class RecordingEngine:
         self.folder = new_folder
         for src in self.sources:
             src.wav_path = os.path.join(new_folder, os.path.basename(src.wav_path))
+
+    def set_tap(self, fn) -> None:
+        """Route every written block to `fn(kind, block)` (or None to detach).
+        Used by the live transcriber; safe to attach/detach mid-recording."""
+        for src in self.sources:
+            src.tap = fn
 
     def get_source(self, kind: str):
         for src in self.sources:

@@ -25,6 +25,7 @@ from datetime import datetime
 
 # status values
 RECORDING = "recording"
+PAUSED = "paused"
 IMPORTING = "importing"
 RECORDED = "recorded"
 TRANSCRIBING = "transcribing"
@@ -37,6 +38,7 @@ OUTPUT = "output.txt"
 TRANSCRIPT_JSON = "transcript.json"
 TRANSCRIPT_TXT = "transcript.txt"
 TRANSCRIPT_MERGED = "transcript.merged.txt"
+LIVE = "live.txt"                # the rolling preview, kept as a fallback
 
 
 def _slug(name: str) -> str:

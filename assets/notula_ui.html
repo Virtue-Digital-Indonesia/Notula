@@ -45,6 +45,7 @@ a{color:var(--link);}
 .hstat{font-size:12px; color:var(--text-2); letter-spacing:.32px; text-transform:uppercase; display:flex; align-items:center; gap:8px; white-space:nowrap;}
 .hstat .dot{width:8px;height:8px;border-radius:50%;background:var(--text-help);}
 .hstat.rec .dot{background:var(--err); animation:blink 1s steps(1) infinite;}
+.hstat.paused .dot{background:var(--warn);}
 .hstat.busy .dot{background:var(--info); animation:blink 1.4s steps(1) infinite;}
 @keyframes blink{50%{opacity:.25;}}
 
@@ -104,10 +105,17 @@ a{color:var(--link);}
 .btn.wauto{width:auto; padding-right:16px; text-align:center;}
 .btn[disabled]{background:var(--layer2); color:var(--text-place); cursor:not-allowed; filter:none;}
 
-/* the big record button */
+/* the big record button (+ pause beside it while recording) */
+.recbtns{display:flex; gap:1px; background:var(--border-sub);}
+.recbtns .btn{flex:1; width:auto;}
 .recbtn{min-height:52px; font-size:16px; text-align:center; padding:8px 16px; display:flex; align-items:center; justify-content:center; gap:10px;}
 .recdot{width:12px;height:12px;border-radius:50%;background:#fff;flex:0 0 auto;}
 .recbtn.rec .recdot{border-radius:2px;}
+/* ❙❙ while running, ▶ once paused */
+.pausebars{width:11px; height:13px; flex:0 0 auto;
+  background:linear-gradient(to right, currentColor 0 4px, transparent 4px 7px, currentColor 7px 11px);}
+.pausebars.play{width:0; height:0; background:none;
+  border-left:12px solid currentColor; border-top:7px solid transparent; border-bottom:7px solid transparent;}
 
 /* ── fields ── */
 .fields{display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:10px 16px; margin-top:4px;}
@@ -153,6 +161,7 @@ a{color:var(--link);}
 .recwrap{display:flex; flex-direction:column; gap:12px;}
 .timer{font-size:34px; font-weight:600; letter-spacing:.5px; color:var(--text); text-align:center; padding:2px 0;}
 .timer.idle{color:var(--text-place);}
+.timer.paused{color:var(--warn);}
 .recmeta{text-align:center; font-size:11.5px; color:var(--text-help); letter-spacing:.24px; min-height:14px;}
 
 /* audio sources (mic + computer) with live level + mute */
@@ -163,6 +172,7 @@ a{color:var(--link);}
 .srcname{font-size:12px; letter-spacing:.32px; text-transform:uppercase; color:var(--text-2); display:flex; align-items:center; gap:8px;}
 .srcname .live{width:7px;height:7px;border-radius:50%;background:var(--text-place);}
 .srcrow.active .srcname .live{background:var(--err); animation:blink 1s steps(1) infinite;}
+.srcrow.paused .srcname .live{background:var(--warn); animation:none;}
 .mutebtn{background:transparent; border:1px solid var(--border-strong); color:var(--text-2);
   height:26px; padding:2px 14px; font-family:inherit; font-size:12px; letter-spacing:.16px; cursor:pointer; border-radius:0;}
 .mutebtn:hover{background:var(--layer); color:var(--text);}
@@ -209,6 +219,25 @@ a{color:var(--link);}
   height:26px; min-width:30px; padding:0 6px; font-size:14px; line-height:1; cursor:pointer; border-radius:0;}
 .gearbtn:hover{background:var(--layer2); color:var(--text);}
 .gearbtn.on{background:var(--primary); border-color:var(--primary); color:#fff;}
+
+/* ── live transcript ── */
+.liverow{display:flex; align-items:center; gap:12px; flex-wrap:wrap; background:var(--layer2); padding:10px 12px;}
+.liverow .toggle{flex:0 0 auto;}
+.liverow .grow{flex:1; min-width:150px;}
+.livemodel{-webkit-appearance:none; appearance:none; width:100%; background:var(--field); color:var(--text);
+  border:0; border-bottom:1px solid var(--border-strong); height:30px; padding:0 32px 0 10px;
+  font-family:inherit; font-size:12.5px; border-radius:0; cursor:pointer;
+  background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16'><path fill='%238d8d8d' d='M8 11L3 6h10z'/></svg>");
+  background-repeat:no-repeat; background-position:right 9px center;}
+.livemodel:focus{outline:2px solid var(--primary); outline-offset:-2px;}
+.livemodel option:disabled{color:var(--text-place);}
+.livenote{font-size:10.5px; color:var(--text-help); letter-spacing:.24px; line-height:1.5; padding:7px 12px 0;}
+.livebody{max-height:250px; overflow-y:auto; background:var(--field); padding:11px 13px;
+  font-size:13px; line-height:1.55; margin-top:2px;}
+.liveline{margin-bottom:5px;}
+.liveline .who{color:var(--link); font-weight:600; margin-right:6px;}
+.liveprov{color:var(--text-help); font-style:italic;}
+.liveempty{color:var(--text-help); font-size:12.5px; text-align:center; padding:10px 0;}
 
 /* test-input row + note */
 .testrow{display:flex; align-items:center; gap:12px; margin-top:2px;}
@@ -310,19 +339,51 @@ a{color:var(--link);}
         <div id="sys_hint" class="srchint"></div>
       </div>
 
-      <button id="rec_btn" class="btn btn-danger recbtn" onclick="onRecord()">
-        <span class="recdot"></span><span id="rec_label">Record</span>
-      </button>
+      <div class="recbtns">
+        <button id="pause_btn" class="btn btn-secondary recbtn" style="display:none;"
+                onclick="post('togglePause')" aria-label="Pause recording">
+          <span class="pausebars"></span><span id="pause_label">Pause</span>
+        </button>
+        <button id="rec_btn" class="btn btn-danger recbtn" onclick="onRecord()">
+          <span class="recdot"></span><span id="rec_label">Record</span>
+        </button>
+      </div>
 
       <div class="testrow">
         <button id="test_btn" class="btn btn-secondary small wauto" onclick="post('toggleMonitor')">Test input</button>
-        <span class="recnote" id="recnote">The meters move only while recording. Tap <b>Test input</b> to preview your mic &amp; computer audio without recording.</span>
+        <span class="recnote" id="recnote">The meters move only while recording. Tap <b>Test input</b> to preview your mic &amp; computer audio without recording. <b>Mute</b> records silence and keeps the timeline; <b>Pause</b> leaves that time out of the recording entirely.</span>
       </div>
+
+      <!-- live transcript: optional, can be flipped on or off at any moment -->
+      <div class="liverow">
+        <label class="toggle" title="Transcribe while you record">
+          <input id="live_on" type="checkbox" onchange="post('setLive',{value:this.checked})">
+          <span class="track"></span><span class="tlab">Live transcript</span>
+        </label>
+        <div class="grow">
+          <select class="livemodel" id="live_model" onchange="onLiveModel(this.value)" aria-label="Live transcription model"></select>
+        </div>
+        <span id="live_stat" class="tag">off</span>
+      </div>
+      <div class="livenote" id="live_note"></div>
 
       <div class="row" style="margin-top:2px;">
         <label class="toggle"><input id="auto_tx" type="checkbox" onchange="post('setAuto',{value:this.checked})"><span class="track"></span><span class="tlab">Transcribe automatically when I stop</span></label>
       </div>
     </div>
+  </section>
+
+  <!-- ── LIVE TRANSCRIPT (only while live is on) ── -->
+  <section class="card" id="live_card" style="display:none;">
+    <div class="chead">
+      <h2>Live transcript</h2>
+      <div style="display:flex; align-items:center; gap:10px;">
+        <span id="live_count" class="tag">0</span>
+        <button class="iconbtn" onclick="post('copyLive')">Copy</button>
+      </div>
+    </div>
+    <div class="sub">A preview, not the deliverable — <b>output.txt</b> is still produced at the end by the full model with speaker labels. Grey italic text is still being revised.</div>
+    <div id="live_body" class="livebody"></div>
   </section>
 
   <!-- ── MEETINGS ── -->
@@ -409,6 +470,9 @@ var WAVE = {mic:[], system:[]};
 var WN = 64;
 var WAS_ACTIVE = false;
 var WAS_REC = false;
+var PAUSED = false;
+var LIVE = {lines:[], pending:'', total:0};
+var LIVE_MODELS = [];
 
 function syncMute(kind, muted){
   MUTED[kind] = !!muted;
@@ -438,11 +502,12 @@ function drawWave(kind, idle){
   var ctx=c.getContext('2d'); ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,w,h);
   var a=WAVE[kind]; var bw=w/WN; var mid=h/2;
   var css=getComputedStyle(document.documentElement);
-  var base = MUTED[kind] ? css.getPropertyValue('--text-place') : css.getPropertyValue('--ok');
+  var dead = MUTED[kind] || PAUSED;    /* paused input is metered but discarded */
+  var base = dead ? css.getPropertyValue('--text-place') : css.getPropertyValue('--ok');
   var hot = css.getPropertyValue('--err');
   for(var i=0;i<a.length;i++){
     var lv=a[i]; var bh=Math.max(1, lv*(h-2));
-    ctx.fillStyle = (!MUTED[kind] && lv>0.9) ? hot : base;
+    ctx.fillStyle = (!dead && lv>0.9) ? hot : base;
     var x=(WN-a.length+i)*bw;
     ctx.fillRect(x+bw*0.15, mid-bh/2, Math.max(1,bw*0.7), bh);
   }
@@ -451,16 +516,17 @@ function pushWave(kind, level){ var a=WAVE[kind]; a.push(level); if(a.length>WN)
 function resetMeters(){
   ['mic','system'].forEach(function(kind){
     WAVE[kind]=[]; var vu=$('vu_'+kind); if(vu){ vu.style.height='0%'; vu.className='vufill'; }
-    var row=$('row_'+kind); if(row) row.classList.remove('active'); drawWave(kind,true);
+    var row=$('row_'+kind); if(row) row.classList.remove('active','paused'); drawWave(kind,true);
   });
 }
 window.notulaLevels = function(p){
   ['mic','system'].forEach(function(kind){
     var d=p[kind]; var row=$('row_'+kind);
+    if(row) row.classList.toggle('paused', PAUSED);
     if(d){
       if(row) row.classList.add('active');
       if(d.muted!==MUTED[kind]) syncMute(kind, d.muted);
-      var vu=$('vu_'+kind); if(vu){ vu.style.height=Math.round(d.level*100)+'%'; vu.className='vufill'+((!MUTED[kind]&&d.level>0.9)?' hot':''); }
+      var vu=$('vu_'+kind); if(vu){ vu.style.height=Math.round(d.level*100)+'%'; vu.className='vufill'+((!MUTED[kind]&&!PAUSED&&d.level>0.9)?' hot':''); }
       pushWave(kind, MUTED[kind]?0:d.level);
     } else {
       if(row) row.classList.remove('active');
@@ -502,9 +568,72 @@ window.notulaInit = function(c){
   if($('sys_on')){ $('sys_on').checked = !!c.system_capture; $('sys_on').disabled = !c.system_available; }
   updateSysUI(!!c.system_capture);
 
+  LIVE_MODELS = c.live_models||[];
+  var sel=$('live_model');
+  if(sel){
+    var key = LIVE_MODELS.map(function(m){ return m.key+':'+m.available; }).join('|');
+    if(sel._key!==key){
+      sel._key=key; sel.innerHTML='';
+      LIVE_MODELS.forEach(function(m){
+        var o=document.createElement('option'); o.value=m.key;
+        o.textContent = m.label+'  ·  '+m.latency+' behind'+(m.available?'':'  — not installed');
+        o.disabled = !m.available; sel.appendChild(o);
+      });
+    }
+    if(s.live_model) sel.value = s.live_model;
+  }
+  if($('live_on')) $('live_on').checked = !!s.live_enabled;
+  updateLiveNote();
+
   syncMute('mic', MUTED.mic); syncMute('system', MUTED.system);
   drawWave('mic', true); drawWave('system', true);
 };
+
+/* ── live transcript ── */
+function updateLiveNote(){
+  var sel=$('live_model'), n=$('live_note'); if(!sel||!n) return;
+  var m = LIVE_MODELS.filter(function(x){ return x.key===sel.value; })[0];
+  n.textContent = m ? (m.available ? m.tradeoff
+                                   : 'Not installed — download '+m.file+' into the whisper-cpp models folder.')
+                    : '';
+}
+function onLiveModel(v){ updateLiveNote(); post('setLiveModel',{value:v}); }
+
+var LIVE_STICK = true;   /* keep pinned to the newest line unless you scroll up */
+(function(){
+  var b=$('live_body');
+  if(b) b.addEventListener('scroll', function(){
+    LIVE_STICK = (b.scrollHeight - b.scrollTop - b.clientHeight) < 24;
+  });
+})();
+
+window.notulaLive = function(p){ LIVE = p||{lines:[],pending:'',total:0}; renderLive(); };
+
+function renderLive(){
+  var body=$('live_body'); if(!body) return;
+  body.innerHTML='';
+  var lv = (STATE && STATE.live) || {};
+  if(!(LIVE.lines||[]).length && !LIVE.pending){
+    var e=document.createElement('div'); e.className='liveempty';
+    e.textContent = lv.running ? (lv.ready ? 'Listening…' : (lv.status||'starting…'))
+                               : (lv.on ? 'Starts when you record.' : 'Off.');
+    body.appendChild(e);
+  } else {
+    (LIVE.lines||[]).forEach(function(l){
+      var d=document.createElement('div'); d.className='liveline';
+      if(l.who){ var w=document.createElement('span'); w.className='who'; w.textContent=l.who+':'; d.appendChild(w); }
+      var t=document.createElement('span'); t.textContent=l.text||''; d.appendChild(t);
+      body.appendChild(d);
+    });
+    if(LIVE.pending){
+      var pv=document.createElement('div'); pv.className='liveline liveprov';
+      pv.textContent=LIVE.pending; body.appendChild(pv);
+    }
+  }
+  var n=LIVE.total||0;
+  setTag($('live_count'), n+(n===1?' line':' lines'), n?'info':'');
+  if(LIVE_STICK) body.scrollTop = body.scrollHeight;
+}
 
 var _selKey={};
 function fillSelect(id, opts, sel){
@@ -517,14 +646,15 @@ function fillSelect(id, opts, sel){
 
 window.notulaState = function(st){
   STATE = st;
+  PAUSED = !!st.paused;
   /* header pill */
-  var h=$('hstat'); var kind = st.recording?'rec':(st.txId?'busy':'');
+  var h=$('hstat'); var kind = st.recording?(st.paused?'paused':'rec'):(st.txId?'busy':'');
   h.className='hstat '+kind;
   $('hstat_t').textContent = st.header||'Idle';
 
   /* record card */
   var t=$('timer'); t.textContent = st.elapsed||'0:00';
-  t.className='timer mono'+(st.recording?'':' idle');
+  t.className='timer mono'+(st.recording?(st.paused?' paused':''):' idle');
   $('recmeta').textContent = st.recmeta||'';
   setTag($('rec_tag'), st.recTag||'Idle', st.recTagKind||'');
 
@@ -544,6 +674,17 @@ window.notulaState = function(st){
   var b=$('rec_btn'), lbl=$('rec_label');
   if(st.recording){ b.className='btn btn-secondary recbtn rec'; lbl.textContent='Stop'; b.disabled=false; }
   else { b.className='btn btn-danger recbtn'; lbl.textContent='Record'; b.disabled=!st.canRecord; }
+
+  /* pause sits beside Stop, and only exists while a recording is running */
+  var pb=$('pause_btn');
+  if(pb){
+    pb.style.display = st.recording ? '' : 'none';
+    pb.className = 'btn recbtn '+(st.paused?'btn-primary':'btn-secondary');
+    pb.setAttribute('aria-label', st.paused?'Resume recording':'Pause recording');
+    $('pause_label').textContent = st.paused ? 'Resume' : 'Pause';
+    var bars=pb.querySelector('.pausebars');
+    if(bars) bars.className = 'pausebars'+(st.paused?' play':'');
+  }
   var tb=$('test_btn');
   if(tb){
     if(st.monitoring){ tb.textContent='Stop test'; tb.className='btn small wauto'; tb.disabled=false; }
@@ -555,7 +696,29 @@ window.notulaState = function(st){
   if(!busy && WAS_ACTIVE) resetMeters();
   WAS_ACTIVE = busy;
 
-  /* live transcription progress on the active row */
+  /* live transcript: toggle, model, status pill, pane visibility */
+  var lv = st.live||{};
+  var lon=$('live_on');
+  if(lon && document.activeElement!==lon) lon.checked = !!lv.on;
+  var lsel=$('live_model');
+  if(lsel && document.activeElement!==lsel && lv.model && lsel.value!==lv.model){
+    lsel.value = lv.model; updateLiveNote();
+  }
+  var ls=$('live_stat');
+  if(ls){
+    if(lv.running && lv.ready) setTag(ls, 'live', 'ok');
+    else if(lv.running) setTag(ls, lv.status||'starting…', 'warn');
+    else if(lv.on) setTag(ls, st.recording?'off':'armed', '');
+    else setTag(ls, 'off', '');
+  }
+  var lc=$('live_card');
+  if(lc){
+    var show = !!(lv.on || (LIVE.total||0) || LIVE.pending);
+    if((lc.style.display!=='none') !== show){ lc.style.display = show?'block':'none'; }
+    if(show) renderLive();
+  }
+
+  /* transcription progress on the active row */
   if(st.txId && st.progress){
     var mp=$('mp_'+st.txId), ms=$('ms_'+st.txId);
     if(mp) mp.style.width = Math.round(st.progress.frac*100)+'%';
@@ -614,7 +777,8 @@ function makeEditor(){
 }
 
 var STATUS_TAG = {
-  recording:['Recording','err'], importing:['Importing','warn'], recorded:['Recorded','info'],
+  recording:['Recording','err'], paused:['Paused','warn'],
+  importing:['Importing','warn'], recorded:['Recorded','info'],
   transcribing:['Transcribing','warn'], transcribed:['Transcribed','ok'], error:['Error','err']
 };
 
