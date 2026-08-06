@@ -34,7 +34,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import socket
 import struct
 import subprocess
@@ -45,11 +44,13 @@ import urllib.request
 
 import numpy as np
 
+import osutil
 import pipeline
+import toolpaths
 
 SR = 16000
 
-WHISPER_SERVER = shutil.which("whisper-server") or f"{pipeline.BREW}/bin/whisper-server"
+WHISPER_SERVER = toolpaths.WHISPER_SERVER
 
 # The window always starts at the commit anchor and runs to "now", so no audio is
 # ever skipped. MAX_WINDOW_S caps how far it can grow (bounding decode cost and
@@ -272,7 +273,10 @@ class LiveTranscriber:
             self._on_status("error", self.error)
             return
         if not os.path.exists(WHISPER_SERVER):
-            self.error = "whisper-server not found (brew install whisper-cpp)"
+            # Name the path rather than a package manager: this is shared code,
+            # and on Windows there is no brew and the user placed the binary
+            # themselves, so where we looked is the only useful thing to say.
+            self.error = f"whisper-server not found at {WHISPER_SERVER}"
             self._on_status("error", self.error)
             return
         self._run = True
@@ -290,19 +294,7 @@ class LiveTranscriber:
 
     def _kill_server(self) -> None:
         p, self._proc = self._proc, None
-        if p is None or p.poll() is not None:
-            return
-        try:
-            os.killpg(os.getpgid(p.pid), 15)
-        except Exception:
-            try:
-                p.terminate()
-            except Exception:
-                pass
-        try:
-            p.wait(timeout=3)
-        except Exception:
-            pass
+        osutil.kill_tree(p)
 
     # ---- worker ----
 
@@ -345,7 +337,7 @@ class LiveTranscriber:
         try:
             self._proc = subprocess.Popen(
                 cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                env=pipeline._clean_env(), start_new_session=True)
+                env=pipeline._clean_env(), **osutil.popen_kwargs())
         except OSError as e:
             self.error = f"could not start whisper-server: {e}"
             self._on_status("error", self.error)

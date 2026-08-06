@@ -72,6 +72,26 @@ a{color:var(--link);}
 /* ── card ── */
 .card{background:var(--layer); padding:14px 16px; margin-top:12px;}
 .card:first-of-type{margin-top:0;}
+
+/* setup notice: a half-finished install is the normal first-run state, and it
+   has to be visible before you record rather than surfacing as a failure after */
+.setupbar{display:flex; gap:12px; align-items:flex-start; background:var(--layer);
+  border-left:3px solid var(--warn); padding:12px 14px; margin-bottom:12px;}
+.setupbar.err{border-left-color:var(--err);}
+.setupbar[hidden]{display:none;}
+.setupbar .sb-ic{flex:0 0 auto; width:18px; height:18px; border-radius:50%;
+  background:var(--warn); color:#161616; font-size:12px; font-weight:700;
+  line-height:18px; text-align:center; margin-top:1px;}
+.setupbar.err .sb-ic{background:var(--err); color:#fff;}
+.setupbar .sb-body{flex:1 1 auto; min-width:0;}
+.setupbar .sb-title{font-size:13.5px; font-weight:600; margin-bottom:3px;}
+.setupbar .sb-text{font-size:11.5px; color:var(--text-2); line-height:1.5;}
+.setupbar .sb-text code{font-family:'IBM Plex Mono',monospace; font-size:11px;
+  background:var(--layer2); padding:1px 4px;}
+/* .btn is width:100% by default here, which would eat the whole row and squeeze
+   the message down to one word per line */
+.setupbar .sb-act{flex:0 0 auto; width:auto; white-space:nowrap;
+  padding:6px 14px; min-height:32px; font-size:12.5px; align-self:center;}
 .card .chead{display:flex; align-items:center; justify-content:space-between; margin-bottom:7px;}
 .card h2{font-size:15px; font-weight:600; margin:0; letter-spacing:0;}
 .card .sub{font-size:11.5px; color:var(--text-help); margin:-2px 0 10px;}
@@ -297,6 +317,23 @@ a{color:var(--link);}
 
 <div class="wrap">
 
+  <!-- ── SETUP NOTICE (hidden unless an external tool is missing) ── -->
+  <div id="setupbar" class="setupbar" hidden>
+    <span class="sb-ic">!</span>
+    <div class="sb-body">
+      <div class="sb-title" id="sb_title"></div>
+      <div class="sb-text" id="sb_text"></div>
+      <div class="meter sb-meter" id="sb_meter" hidden style="margin:10px 0 0;">
+        <div class="top"><span class="lab" id="sb_pmsg">Starting…</span>
+          <span class="lab" id="sb_pdet" style="opacity:.7"></span></div>
+        <div class="track"><div class="fill" id="sb_pfill"></div></div>
+      </div>
+    </div>
+    <button class="btn btn-primary sb-act" id="sb_install" onclick="installDeps()">Install</button>
+    <button class="btn btn-secondary sb-act" id="sb_cancel" hidden onclick="post('cancelDeps')">Stop</button>
+    <button class="btn btn-secondary sb-act" id="sb_details" onclick="post('setupHelp')">Details</button>
+  </div>
+
   <!-- ── RECORD ── -->
   <section class="card">
     <div class="chead"><h2>Record</h2><span id="rec_tag" class="tag">Idle</span></div>
@@ -323,7 +360,7 @@ a{color:var(--link);}
         </div>
       </div>
 
-      <!-- source: computer audio (ScreenCaptureKit — no loopback driver needed) -->
+      <!-- source: computer audio (platform backend — no loopback driver needed) -->
       <div class="srcrow" id="row_system">
         <div class="srchead">
           <span class="srcname"><span class="live"></span>Computer audio</span>
@@ -419,6 +456,7 @@ a{color:var(--link);}
   <div class="footbar">
     <button class="btn btn-secondary" onclick="post('refresh')">Refresh</button>
     <button class="btn btn-secondary" onclick="post('openLibrary')">Open library</button>
+    <div class="sub" id="verline" style="margin:10px 0 0; text-align:right;"></div>
     <button class="btn btn-tertiary"  onclick="post('quit')">Quit</button>
   </div>
 
@@ -453,9 +491,29 @@ a{color:var(--link);}
 </div>
 
 <script>
-function post(action, extra){
-  try{ window.webkit.messageHandlers.notula.postMessage(Object.assign({action:action}, extra||{})); }catch(e){}
+/* One page, two shells. macOS hands us a WKWebView message handler; Windows a
+   pywebview/WebView2 bridge that isn't attached until 'pywebviewready' fires, so
+   anything sent before then is queued rather than dropped. */
+var POST_QUEUE = [];
+function _send(msg){
+  if(window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.notula){
+    window.webkit.messageHandlers.notula.postMessage(msg); return true;
+  }
+  if(window.pywebview && window.pywebview.api && window.pywebview.api.post){
+    var p = window.pywebview.api.post(msg);
+    if(p && p.catch) p.catch(function(){});
+    return true;
+  }
+  return false;
 }
+function post(action, extra){
+  var msg = Object.assign({action:action}, extra||{});
+  try{ if(!_send(msg)) POST_QUEUE.push(msg); }catch(e){}
+}
+window.addEventListener('pywebviewready', function(){
+  var q = POST_QUEUE; POST_QUEUE = [];
+  q.forEach(function(m){ try{ _send(m); }catch(e){} });
+});
 function $(id){ return document.getElementById(id); }
 function setTag(el, text, kind){ if(!el) return; el.textContent=text; el.className="tag "+(kind||""); }
 function esc(s){ return (s==null?'':String(s)); }
@@ -482,14 +540,81 @@ function syncMute(kind, muted){
 function toggleMute(kind){ syncMute(kind, !MUTED[kind]); post('setMute',{kind:kind, muted:MUTED[kind]}); }
 
 window.SYS_AVAILABLE = true; window.SCREEN_OK = true;
+/* How computer audio works differs per platform (ScreenCaptureKit + a Screen
+   Recording grant on macOS, WASAPI loopback and no grant at all on Windows), so
+   the wording comes from Python via notulaInit rather than being baked in here. */
+window.SYS_TEXT = {desc:'', permission:'', unavailable:''};
+
+/* Whether every required external tool is present. Drives the notice below the
+   header and disables Transcribe, so a missing dependency shows up before you
+   record rather than after. */
+var SETUP_OK = true;
+var SETUP_BUSY = false;
+
+function human(bytes){
+  if(!bytes) return '';
+  var gb = bytes/1073741824;
+  return gb >= 1 ? gb.toFixed(1)+' GB' : Math.round(bytes/1048576)+' MB';
+}
+function installDeps(){
+  if(SETUP_BUSY) return;
+  post('installDeps', {live:false});
+}
+/* Progress for the in-app download of ffmpeg / whisper / the models. Its own
+   channel because it ticks on the download's cadence, not the UI heartbeat. */
+window.notulaSetupProgress = function(p){
+  p = p || {running:false};
+  SETUP_BUSY = !!p.running;
+  var m=$('sb_meter'), ins=$('sb_install'), can=$('sb_cancel'), det=$('sb_details');
+  if(m) m.hidden = !p.running;
+  if(ins) ins.hidden = !!p.running;
+  if(can) can.hidden = !p.running;
+  if(det) det.hidden = !!p.running;
+  if(!p.running) return;
+  $('sb_pmsg').textContent = p.msg||'';
+  $('sb_pdet').textContent = p.detail||'';
+  $('sb_pfill').style.width = Math.round((p.frac||0)*100)+'%';
+};
+
+function renderSetup(s){
+  var bar=$('setupbar'); if(!bar) return;
+  SETUP_OK = !s || !!s.ok;
+  if(SETUP_OK && !SETUP_BUSY){ bar.hidden = true; return; }
+  bar.hidden = false;
+  /* ffmpeg is the one whose absence costs you audio rather than just blocking a
+     later step, so it reads as an error rather than a warning */
+  bar.classList.toggle('err', !!s.loses_audio);
+  $('sb_title').textContent = s.loses_audio
+    ? 'ffmpeg is missing — recordings will lose a track'
+    : 'Setup incomplete — transcription is unavailable';
+  var names = (s.missing||[]).map(function(m){ return m.label; }).join(', ');
+  var parts = ['Missing: ' + names + '.'];
+  parts.push(s.loses_audio
+    ? 'You can still record, but a meeting that captures your microphone and computer audio together cannot be mixed — only the microphone would be kept.'
+    : 'Recording works; transcribing does not.');
+  /* Notula can fetch these itself; the manual hint is the fallback, not the
+     instruction, so it only appears when there's nothing to click. */
+  var ins=$('sb_install');
+  if(ins){
+    var size = human(s.install_bytes);
+    ins.textContent = size ? ('Install · ' + size) : 'Install';
+    ins.hidden = SETUP_BUSY;
+    ins.title = (s.install_steps||[]).join(', ');
+  }
+  /* the button is the instruction; the manual commands live behind Details */
+  parts.push(s.needs_brew
+    ? 'Notula can install these for you using Homebrew.'
+    : 'Notula can download these for you.');
+  $('sb_text').textContent = parts.join(' ');
+}
 function updateSysUI(on){
   var active = on && window.SYS_AVAILABLE;
   var row=$('row_system'); if(row) row.classList.toggle('off', !active);
   var mb=$('mute_system'); if(mb) mb.disabled = !active;
   var hint=$('sys_hint'); if(!hint) return;
-  if(!window.SYS_AVAILABLE){ hint.textContent='Computer audio needs macOS 13 or newer.'; }
-  else if(on && !window.SCREEN_OK){ hint.textContent='Needs Screen Recording permission — macOS will ask when you record.'; }
-  else if(on){ hint.textContent='Captures all computer audio via ScreenCaptureKit — no extra drivers.'; }
+  if(!window.SYS_AVAILABLE){ hint.textContent=window.SYS_TEXT.unavailable; }
+  else if(on && !window.SCREEN_OK && window.SYS_TEXT.permission){ hint.textContent=window.SYS_TEXT.permission; }
+  else if(on){ hint.textContent=window.SYS_TEXT.desc; }
   else { hint.textContent='Off. Turn on to also record the other participants (system audio).'; }
 }
 function onSysToggle(on){ post('setSystemCapture',{value:on}); updateSysUI(on); }
@@ -565,6 +690,12 @@ window.notulaInit = function(c){
 
   window.SYS_AVAILABLE = !!c.system_available;
   window.SCREEN_OK = !!c.screen_ok;
+  window.SYS_TEXT = {desc: c.system_desc||'', permission: c.system_permission_hint||'',
+                     unavailable: c.system_unavailable||''};
+  renderSetup(c.setup);
+  /* which build this is — a beta tester's report is unusable without it */
+  var vl=$('verline');
+  if(vl) vl.textContent = 'Notula ' + (c.version||'') + ' · ' + (c.platform||'');
   if($('sys_on')){ $('sys_on').checked = !!c.system_capture; $('sys_on').disabled = !c.system_available; }
   updateSysUI(!!c.system_capture);
 
@@ -834,7 +965,11 @@ function renderRow(m){
   if(m.hasAudio){
     var tb=document.createElement('button'); tb.className='btn btn-primary small';
     tb.textContent = (m.status==='transcribed')?'Re-transcribe':'Transcribe';
-    tb.disabled = busy; tb.onclick=function(){ openTranscribe(m.id, m.name); };
+    /* nothing to transcribe with until whisper and the models are installed --
+       better to disable and say why than to fail after the user commits */
+    tb.disabled = busy || !SETUP_OK;
+    if(!SETUP_OK) tb.title = 'Transcription needs whisper and the models - see the notice above';
+    tb.onclick=function(){ openTranscribe(m.id, m.name); };
     acts.appendChild(tb);
   }
   if(m.hasOutput){

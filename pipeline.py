@@ -17,26 +17,32 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 from pathlib import Path
 from typing import Callable, Optional
 
-BREW = "/opt/homebrew"
-MODELS_DIR = Path(BREW) / "share/whisper-cpp/models"
-# Absolute fallbacks matter inside a .app bundle, where PATH is stripped and
-# shutil.which() finds nothing.
-WHISPER_CLI = shutil.which("whisper-cli") or f"{BREW}/bin/whisper-cli"
-FFPROBE = shutil.which("ffprobe") or f"{BREW}/bin/ffprobe"
-FFMPEG = shutil.which("ffmpeg") or f"{BREW}/bin/ffmpeg"
+import osutil
+import toolpaths
+
+# Resolved by toolpaths, which knows where each platform keeps these. Absolute
+# paths matter inside a bundled app, where PATH is stripped and which() finds
+# nothing — on macOS *and* on Windows, where an app launched from Explorer
+# inherits a different PATH than one launched from a shell.
+MODELS_DIR = toolpaths.MODELS_DIR
+WHISPER_CLI = toolpaths.WHISPER_CLI
+FFPROBE = toolpaths.FFPROBE
+FFMPEG = toolpaths.FFMPEG
 
 
 def _resource_dir() -> Path:
-    """Where our bundled data files live: Contents/Resources under py2app, or
-    this file's directory when running from source."""
+    """Where our bundled data files live: Contents/Resources under py2app,
+    _MEIPASS under PyInstaller, or this file's directory when running from
+    source."""
     if getattr(sys, "frozen", False):
-        return Path(os.environ.get("RESOURCEPATH") or os.path.dirname(sys.executable))
+        return Path(os.environ.get("RESOURCEPATH")
+                    or getattr(sys, "_MEIPASS", "")
+                    or os.path.dirname(sys.executable))
     return Path(__file__).parent
 
 
@@ -46,8 +52,7 @@ DIARIZE_SCRIPT = _resource_dir() / "diarize_and_merge.py"
 
 # The transcription venv (torch/pyannote/soundfile) is external and machine-local;
 # override with $NOTULA_TX_PYTHON if it lives elsewhere.
-TX_PYTHON = (os.environ.get("NOTULA_TX_PYTHON")
-             or "/Users/macbook/Documents/openai-whisper/.venv/bin/python3")
+TX_PYTHON = toolpaths.TX_PYTHON
 
 WHISPER_W = 0.70   # transcribe spans 0..0.70 of the bar; diarize 0.70..1.0
 
@@ -82,8 +87,9 @@ class TokenMissingError(DiarizationError):
 
 # ---- helpers ------------------------------------------------------------------
 
-# py2app leaks these into the environment; passing them to the EXTERNAL tx-venv
-# python makes it search the frozen app's stripped stdlib and fail to import.
+# py2app (and PyInstaller) leak these into the environment; passing them to the
+# EXTERNAL tx-venv python makes it search the frozen app's stripped stdlib and
+# fail to import.
 _PY_ENV_STRIP = (
     "PYTHONHOME", "PYTHONPATH", "PYTHONEXECUTABLE", "PYTHONNOUSERSITE",
     "PYTHONDONTWRITEBYTECODE", "PYTHONFRAMEWORK", "PYTHONUSERBASE",
@@ -99,6 +105,21 @@ def _clean_env(**extra) -> dict:
 
 def _noop(stage: str, frac: float, msg: str) -> None:
     pass
+
+
+# Whisper's VAD model. Homebrew ships one exact version, so macOS could name it
+# outright; on Windows you fetch it yourself and will have whichever silero build
+# was current, so accept any of them and prefer the newest.
+VAD_MODEL = "ggml-silero-v6.2.0.bin"
+VAD_GLOB = "ggml-silero-*.bin"
+
+
+def find_vad_model() -> Optional[Path]:
+    exact = MODELS_DIR / VAD_MODEL
+    if exact.exists():
+        return exact
+    found = sorted(MODELS_DIR.glob(VAD_GLOB)) if MODELS_DIR.is_dir() else []
+    return found[-1] if found else None
 
 
 class _Mono:
@@ -119,7 +140,8 @@ def convert_to_wav(src, dst) -> tuple[bool, str | None]:
     cmd = [FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-i", str(src),
            "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", str(dst)]
     try:
-        subprocess.run(cmd, check=True, capture_output=True)
+        subprocess.run(cmd, check=True, capture_output=True,
+                       **osutil.popen_kwargs(new_group=False))
         return True, None
     except subprocess.CalledProcessError as e:
         err = (e.stderr or b"").decode("utf-8", "replace").strip()
@@ -134,6 +156,7 @@ def probe_duration(wav: Path) -> float:
             [FFPROBE, "-v", "error", "-show_entries", "format=duration",
              "-of", "default=nw=1:nk=1", str(wav)],
             capture_output=True, text=True, timeout=30,
+            **osutil.popen_kwargs(new_group=False),
         ).stdout.strip()
         return float(out or 0.0)
     except (OSError, ValueError, subprocess.TimeoutExpired):
@@ -154,7 +177,9 @@ def _run_whisper(wav, prefix, model_file, vad_model, lang, duration, emit, on_pr
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True, bufsize=1,
                             encoding="utf-8", errors="replace",   # not the ASCII locale
-                            start_new_session=True)   # own process group, killable on quit
+                            # own process group, killable on quit; and on Windows
+                            # no console window flashing over the UI
+                            **osutil.popen_kwargs())
     if on_proc:
         on_proc(proc)
     tail: list[str] = []
@@ -189,7 +214,7 @@ def _run_diarize(wav, json_path, merged, token, mn, mx, tx_python, emit, on_proc
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True, bufsize=1, env=env,
                             encoding="utf-8", errors="replace",   # child emits UTF-8
-                            start_new_session=True)
+                            **osutil.popen_kwargs())
     if on_proc:
         on_proc(proc)
     tail: list[str] = []
@@ -243,10 +268,12 @@ def transcribe_meeting(wav_path, out_dir, *, lang="id", min_speakers=None,
     emit = _Mono(progress_cb or _noop)
 
     model_file = MODELS_DIR / f"ggml-{model}.bin"
-    vad_model = MODELS_DIR / "ggml-silero-v6.2.0.bin"
-    for f in (model_file, vad_model):
-        if not f.exists():
-            raise ModelNotFoundError(f"missing model file: {f}")
+    if not model_file.exists():
+        raise ModelNotFoundError(f"missing model file: {model_file}")
+    vad_model = find_vad_model()
+    if vad_model is None:
+        raise ModelNotFoundError(
+            f"missing VAD model: no {VAD_GLOB} in {MODELS_DIR}")
     if not wav.exists():
         raise PipelineError(f"recording not found: {wav}")
 

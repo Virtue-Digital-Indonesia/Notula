@@ -35,7 +35,11 @@ else
 fi
 
 # ---- package DMG ----
-VER="$(defaults read "$PWD/$APP/Contents/Info" CFBundleShortVersionString 2>/dev/null || echo 1.0)"
+# version.py, not the plist: Info.plist can only hold dot-separated integers, so
+# it has no idea this is a beta. The DMG people download should say so.
+VER="$(python3 version.py 2>/dev/null \
+       || defaults read "$PWD/$APP/Contents/Info" CFBundleShortVersionString 2>/dev/null \
+       || echo 1.0)"
 DMG="dist/Notula-${VER}.dmg"
 STAGE="dist/dmgroot"
 rm -rf "$STAGE" "$DMG"

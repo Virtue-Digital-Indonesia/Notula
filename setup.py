@@ -17,6 +17,8 @@ WHAT'S BUNDLED vs NOT
 
 from setuptools import setup
 
+from version import VERSION_SHORT
+
 APP = ["notula.py"]
 
 DATA_FILES = [
@@ -35,17 +37,27 @@ OPTIONS = {
         "objc", "Foundation", "AppKit", "WebKit", "CoreMedia",
         "AVFoundation", "ScreenCaptureKit", "libdispatch", "Quartz",
         "PyObjCTools", "PyObjCTools.AppHelper",
-        # our own modules (all imported by notula.py, but be explicit)
-        "config", "library", "recorder", "pipeline", "permissions",
-        "sysaudio", "appicon",
+        # our own modules (all reachable from notula.py, but be explicit)
+        "appcore", "config", "library", "recorder", "pipeline", "live",
+        "dsp", "osutil", "toolpaths", "appicon", "deps", "version",
+        "permissions", "permissions_mac", "sysaudio", "sysaudio_mac",
     ],
-    "excludes": ["tkinter", "torch", "pyannote", "py2app"],
+    # The Windows half of the app. sysaudio.py / permissions.py pick a backend at
+    # runtime, but modulegraph walks both branches statically, so without these
+    # every build ends in a wall of "missing module: pyaudiowpatch" warnings.
+    "excludes": [
+        "tkinter", "torch", "pyannote", "py2app",
+        "notula_win", "sysaudio_win", "permissions_win",
+        "pyaudiowpatch", "webview",
+    ],
     "plist": {
         "CFBundleName": "Notula",
         "CFBundleDisplayName": "Notula",
         "CFBundleIdentifier": "id.val.notula",
-        "CFBundleVersion": "1.3",
-        "CFBundleShortVersionString": "1.3",
+        # dot-separated integers only — the full version (with any -betaN) goes
+        # on the DMG and the installer, which people actually read
+        "CFBundleVersion": VERSION_SHORT,
+        "CFBundleShortVersionString": VERSION_SHORT,
         "NSHighResolutionCapable": True,
         "LSApplicationCategoryType": "public.app-category.productivity",
         "LSMinimumSystemVersion": "13.0",

@@ -1,0 +1,27 @@
+# Notula — GUI app dependencies (Windows 10 1903+ / 11, x64).
+# Install into the app's own venv:
+#   py -3 -m venv .venv
+#   .venv\Scripts\pip install -r requirements-win.txt
+# or just double-click run.bat, which does it for you.
+#
+# These are ONLY what the window/app needs. Transcription itself shells out to:
+#   * whisper-cli.exe / whisper-server.exe  — a whisper.cpp release build
+#   * ffmpeg.exe / ffprobe.exe
+#   * the transcription venv (torch / pyannote / soundfile) for diarization
+# See docs/windows.md for where to put each of those.
+
+pywebview>=5.0          # the window — hosts the UI in WebView2 (Edge Chromium)
+pythonnet>=3.0          # how pywebview reaches WebView2; usually pulled in by
+                        # pywebview, pinned here so a failure is legible
+sounddevice>=0.5        # microphone capture (bundles PortAudio) — levels + mute
+numpy>=1.26             # level (RMS), mixing and resampling math
+
+# Computer audio. sounddevice's PortAudio build does NOT expose the WASAPI
+# loopback flag (its WasapiSettings has exclusive/auto_convert and no loopback),
+# so capturing what the speakers are playing needs this patched PortAudio fork.
+# Without it Notula still runs — computer audio is just greyed out.
+PyAudioWPatch>=0.2.12
+
+# Also required, but not a pip package: the Microsoft Edge WebView2 Runtime.
+# Present by default on Windows 11 and on up-to-date Windows 10; otherwise:
+#   https://developer.microsoft.com/microsoft-edge/webview2/

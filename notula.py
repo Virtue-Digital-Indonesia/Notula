@@ -2,16 +2,16 @@
 """
 Notula — record meetings, then transcribe + diarize them into a clean output.txt.
 
-A native macOS window (WKWebView + IBM Carbon UI) over a small Python engine:
-  * recorder.py  — ffmpeg captures an audio device to a 16 kHz mono WAV
-  * library.py   — each meeting is a folder with the recording + transcripts
-  * pipeline.py  — whisper-cli transcription + pyannote diarization + merge
-
-Recording and transcription run on background threads; per the WKWebView rules
-every UI push is marshaled back to the main thread (AppHelper.callAfter) because
-evaluateJavaScript is main-thread-only.
+This file is the **macOS shell**: an NSWindow with a WKWebView in it, plus the
+dozen native services the app needs (clipboard, file panels, alerts, dark-mode,
+marshalling work back to the main thread). Everything the app actually *does*
+lives in appcore.py, which knows nothing about AppKit — see notula_win.py for the
+same shell built on WebView2.
 
     ./.venv/bin/python notula.py
+
+Per the WKWebView rules every UI push is marshaled back to the main thread
+(AppHelper.callAfter), because evaluateJavaScript is main-thread-only.
 
 Config: ~/.config/notula/notula.json
 """
@@ -20,11 +20,8 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import signal
-import subprocess
 import sys
-import threading
 
 import objc
 from Foundation import NSObject, NSTimer, NSRunLoop, NSMakeRect, NSBundle, NSURL
@@ -44,53 +41,18 @@ from AppKit import (
 )
 from WebKit import WKWebView, WKWebViewConfiguration, WKUserContentController
 
-import config
-import library
-import recorder
-import pipeline
-import permissions
-import sysaudio
+import appcore
 import appicon
-import live
+import osutil
 
 HANDLER = "notula"   # must match window.webkit.messageHandlers.<name> in the HTML
-
-# the gated pyannote model diarization uses — the user must accept its terms once
-HF_MODEL_URL = "https://huggingface.co/pyannote/speaker-diarization-community-1"
-HF_TOKENS_URL = "https://huggingface.co/settings/tokens"
-
-# what ffmpeg is allowed to be pointed at on import. Also a guard: AppKit hands
-# the script path to application:openFiles: when the app is run from source, so
-# without this a plain `python notula.py` imports notula.py as a "meeting".
-MEDIA_EXTS = ("wav", "w64", "mp3", "mp2", "m4a", "m4b", "aac", "aif", "aiff",
-              "flac", "ogg", "oga", "opus", "caf", "wma", "amr", "au", "mka",
-              "mp4", "mov", "m4v", "webm", "mkv", "avi", "flv", "wmv", "asf",
-              "mpg", "mpeg", "ts", "mts", "m2ts", "vob", "3gp", "3g2")
 
 
 # ---- resources ---------------------------------------------------------------
 
-def resource_base() -> str:
-    if getattr(sys, "frozen", False):
-        return os.environ.get("RESOURCEPATH") or os.path.dirname(sys.executable)
-    return os.path.dirname(os.path.abspath(__file__))
-
-
-def load_html() -> str:
-    base = resource_base()
-    with open(os.path.join(base, "assets", "notula_ui.html"), encoding="utf-8") as fh:
-        html = fh.read()
-    faces = ""
-    try:
-        with open(os.path.join(base, "assets", "fonts", "plex_b64.json"), encoding="utf-8") as fh:
-            for key, b64 in json.load(fh).items():
-                fam, wt = key.split("|")
-                faces += (f"@font-face{{font-family:'{fam}';font-style:normal;"
-                          f"font-weight:{wt};font-display:swap;"
-                          f"src:url(data:font/woff2;base64,{b64}) format('woff2');}}\n")
-    except (OSError, ValueError):
-        pass
-    return html.replace("__FONTS__", faces)
+# the UI and its fonts are loaded identically on both platforms
+resource_base = appcore.resource_base
+load_html = appcore.load_html
 
 
 def system_dark() -> bool:
@@ -101,13 +63,6 @@ def system_dark() -> bool:
         return "Dark" in str(name)
     except Exception:
         return True
-
-
-def fmt_elapsed(sec) -> str:
-    sec = int(sec or 0)
-    m, s = divmod(sec, 60)
-    h, m = divmod(m, 60)
-    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
 # ---- heartbeat ticker --------------------------------------------------------
@@ -126,144 +81,78 @@ class _Ticker(NSObject):
             traceback.print_exc()
 
 
-# ---- bridge (the whole app) --------------------------------------------------
+# ---- the macOS host ----------------------------------------------------------
 
 class Bridge(NSObject):
+    """WKWebView delegate + message handler, and appcore's Host on this platform.
+
+    Everything here is either an ObjC callback the framework hands us, or one of
+    the Host methods appcore calls when it needs something only AppKit can do.
+    """
 
     @objc.python_method
     def setup(self):
-        self.cfg = config.load()
-        library.ensure_root(self.cfg["library"])
-        self._devices = []
-        self.mic_idx = None
-        self.system_on = False
-        self._mute = {"mic": False, "system": False}
-        self.monitor = None
-        self.rec = None
-        self.rec_mid = None
-        self.rec_name = ""
-        self.rec_seq = 0        # bumped per recording; survives a mid-flight rename
-        self._stopping = False
-        self.live = None        # LiveTranscriber while it's running
-        self._live_status = ""
-        self._live_lines = []   # committed lines shown/saved (survives model switches)
-        self._live_base = []    # lines from earlier transcriber instances
-        self._live_pending = ""
-        self.tx_mid = None
-        self._tx_progress = None
-        self._tx_proc = None
+        self.core = appcore.AppCore(self)
         self._nstimer = None
         self._ticker = None
-        self._tick_count = 0
-        self._last_dark = None
-        self._torn = False
         return self
 
-    # ---- Python -> JS helpers (always main thread) ----
+    # ---- Host: web view ----
 
     @objc.python_method
-    def _js(self, fn, *args):
-        try:
-            payload = ",".join(json.dumps(a) for a in args)
-            self.web.evaluateJavaScript_completionHandler_(f"{fn}({payload})", None)
-        except Exception:
-            pass
+    def js(self, fn, *args):
+        payload = ",".join(json.dumps(a) for a in args)
+        self.web.evaluateJavaScript_completionHandler_(f"{fn}({payload})", None)
 
     @objc.python_method
-    def _toast(self, text, kind="info"):
-        self._js("showToast", text, kind)
-
-    # ---- theme ----
+    def on_main(self, fn, *args):
+        AppHelper.callAfter(fn, *args)
 
     @objc.python_method
-    def _resolve_theme(self):
-        mode = os.environ.get("NOTULA_THEME", "").lower() or self.cfg.get("theme", "auto")
-        if mode not in ("auto", "light", "dark"):
-            mode = "auto"
-        dark = system_dark() if mode == "auto" else (mode == "dark")
-        return mode, dark
+    def is_dark(self):
+        return system_dark()
 
     @objc.python_method
-    def _apply_theme(self):
-        mode, dark = self._resolve_theme()
-        self._last_dark = dark
-        self._js("applyTheme", mode, dark)
+    def close(self):
+        self.win.close()
 
-    # ---- devices ----
+    # ---- Host: native dialogs ----
 
     @objc.python_method
-    def _scan_devices(self):
-        self._devices = recorder.list_input_devices()
-        self._resolve_selection()
-        return self._devices
+    def confirm(self, message, info=""):
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_(message)
+        if info:
+            alert.setInformativeText_(info)
+        alert.addButtonWithTitle_("Delete")
+        alert.addButtonWithTitle_("Cancel")
+        return alert.runModal() == 1000    # NSAlertFirstButtonReturn
 
     @objc.python_method
-    def _resolve_selection(self):
-        idxs = [d["index"] for d in self._devices]
-        mic = self.cfg.get("mic_device")
-        self.mic_idx = mic if mic in idxs else recorder.default_mic_index()
-        # computer audio is captured via ScreenCaptureKit (no loopback driver)
-        self.system_on = bool(self.cfg.get("system_capture")) and sysaudio.AVAILABLE
+    def alert(self, title, body):
+        a = NSAlert.alloc().init()
+        a.setMessageText_(title)
+        if body:
+            a.setInformativeText_(body)
+        a.addButtonWithTitle_("OK")
+        a.runModal()
 
     @objc.python_method
-    def _device_name(self, index):
-        if index is None:
-            return ""
-        for d in self._devices:
-            if d["index"] == index:
-                return d["name"]
-        return f"device {index}"
+    def prompt_hf_token(self, callback):
+        """Token prompt with a third button that opens the two pages you need
+        first, then re-asks — the terms have to be accepted before a token works.
 
-    # ---- initial push (once the page has loaded) ----
-
-    def webView_didFinishNavigation_(self, web, nav):     # WKNavigationDelegate
-        self._scan_devices()
-        self._push_init()
-        self._push_meetings()
-        self._push_state()
-        self._startup_permissions()
+        Runs modally on the main thread, which is safe here: NSAlert.runModal
+        keeps the run loop pumping, so the rest of the app stays alive. The
+        callback is invoked before returning."""
+        callback(self._run_hf_prompt())
 
     @objc.python_method
-    def _startup_permissions(self):
-        """On launch, check + prompt for both permissions the app needs:
-        Microphone (to record you) and Screen Recording (for computer audio)."""
-        st = permissions.mic_status()
-        if st == permissions.NOT_DETERMINED:
-            permissions.request_mic(
-                lambda g: AppHelper.callAfter(self._after_startup_mic, bool(g)))
-        elif st in (permissions.DENIED, permissions.RESTRICTED):
-            self._toast("Microphone is off — turn on Notula in System Settings › "
-                        "Privacy & Security › Microphone so it can record you.", "warn")
-
-        # Screen Recording powers computer-audio capture (ScreenCaptureKit).
-        if self.system_on and not permissions.screen_recording_ok():
-            permissions.request_screen_recording()
-            self._toast("Allow Notula in System Settings › Privacy & Security › "
-                        "Screen Recording to capture computer audio, then relaunch.",
-                        "warn")
-
-        # HuggingFace token — needed for speaker diarization; prompt if missing.
-        if not config.hf_token(self.cfg):
-            self._prompt_hf_token()
-
-    @objc.python_method
-    def _prompt_hf_token(self):
-        """Launch-time popup to collect the HuggingFace token, with a reminder to
-        accept the gated model's terms first. Skippable (transcripts still work,
-        just without speaker labels)."""
+    def _run_hf_prompt(self):
         while True:
             alert = NSAlert.alloc().init()
-            alert.setMessageText_("Enable speaker labels (diarization)")
-            alert.setInformativeText_(
-                "To label who is speaking, Notula uses the pyannote model, which is "
-                "free but gated — you must do this once:\n\n"
-                "1.  Open the model page and click Agree/Accept its terms:\n"
-                f"      {HF_MODEL_URL}\n"
-                "2.  Create a HuggingFace access token (Read):\n"
-                f"      {HF_TOKENS_URL}\n"
-                "3.  Paste the token below.\n\n"
-                "You can Skip — you'll still get full transcripts, just without "
-                "speaker labels. Add a token later under the ⚙ gear.")
+            alert.setMessageText_(appcore.HF_PROMPT_TITLE)
+            alert.setInformativeText_(appcore.HF_PROMPT_BODY)
             field = NSSecureTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 340, 24))
             field.setPlaceholderString_("hf_…")
             alert.setAccessoryView_(field)
@@ -276,986 +165,73 @@ class Bridge(NSObject):
                 pass
             resp = alert.runModal()
             if resp == 1000:                      # Save & enable
-                tok = str(field.stringValue()).strip()
-                if tok:
-                    self.cfg["hf_token"] = tok
-                    config.save(self.cfg)
-                    self._push_init()
-                    self._toast("Token saved — speaker labels enabled ✓", "ok")
-                else:
-                    self._toast("No token entered — diarization stays off. Add one "
-                                "later under ⚙.", "warn")
-                return
-            elif resp == 1001:                    # Open HuggingFace, then re-ask
-                subprocess.Popen(["open", HF_MODEL_URL])
-                subprocess.Popen(["open", HF_TOKENS_URL])
+                return str(field.stringValue()).strip() or None
+            if resp == 1001:                      # Open HuggingFace, then re-ask
+                osutil.open_url(appcore.HF_MODEL_URL)
+                osutil.open_url(appcore.HF_TOKENS_URL)
                 continue
-            else:                                 # Skip
-                self._toast("Skipped — transcripts won't have speaker labels "
-                            "until you add a HuggingFace token (⚙).", "warn")
-                return
+            return None                           # Skip
 
     @objc.python_method
-    def _after_startup_mic(self, granted):
-        if granted:
-            self._toast("Microphone ready", "ok")
-        else:
-            self._toast("Microphone access denied — enable it later in System "
-                        "Settings › Privacy & Security › Microphone.", "warn")
+    def pick_media_file(self, exts):
+        panel = NSOpenPanel.openPanel()
+        panel.setCanChooseFiles_(True)
+        panel.setCanChooseDirectories_(False)
+        panel.setAllowsMultipleSelection_(False)
+        panel.setTitle_("Import a recording to transcribe")
+        panel.setAllowedFileTypes_(list(exts))
+        return panel.URLs()[0].path() if panel.runModal() == 1 else None
 
     @objc.python_method
-    def _push_init(self):
-        mode, dark = self._resolve_theme()
-        self._last_dark = dark
-        token = config.hf_token(self.cfg)
-        self._js("notulaInit", {
-            "theme": {"mode": mode, "dark": dark},
-            "settings": {
-                "lang": self.cfg["lang"],
-                "model": self.cfg["model"],
-                "min_speakers": self.cfg["min_speakers"],
-                "max_speakers": self.cfg["max_speakers"],
-                "library": self.cfg["library"],
-                "auto_transcribe": self.cfg["auto_transcribe"],
-                "hf_ok": bool(token),
-                "hf_token_masked": ("•" * 12) if self.cfg.get("hf_token") else "",
-                "live_enabled": bool(self.cfg.get("live_enabled")),
-                "live_model": self.cfg.get("live_model") or live.DEFAULT_MODEL,
-            },
-            "live_models": live.available_models(),
-            "inputs": self._devices,
-            "mic_selected": self.mic_idx,
-            "system_capture": self.system_on,
-            "system_available": sysaudio.AVAILABLE,
-            "screen_ok": permissions.screen_recording_ok(),
-        })
+    def pick_folder(self, prompt="Choose"):
+        panel = NSOpenPanel.openPanel()
+        panel.setCanChooseFiles_(False)
+        panel.setCanChooseDirectories_(True)
+        panel.setAllowsMultipleSelection_(False)
+        panel.setPrompt_(prompt)
+        return panel.URLs()[0].path() if panel.runModal() == 1 else None
 
     @objc.python_method
-    def _push_meetings(self):
-        self._js("notulaMeetings", library.list_meetings(self.cfg["library"]))
+    def copy_text(self, text):
+        pb = NSPasteboard.generalPasteboard()
+        pb.clearContents()
+        pb.setString_forType_(text, NSPasteboardTypeString)
 
-    @objc.python_method
-    def _push_state(self):
-        recording = self.rec is not None and self.rec.running
-        paused = recording and self.rec.paused
-        monitoring = self.monitor is not None
-        elapsed = self.rec.elapsed if self.rec else 0.0
-        sources = self._device_name(self.mic_idx) + ("  +  computer audio" if self.system_on else "")
-        if recording:
-            header = f"{'Paused' if paused else 'Recording'}  {fmt_elapsed(elapsed)}"
-            rec_tag, rec_kind = ("Paused", "warn") if paused else ("Recording", "err")
-            recmeta = ("Paused — this time is left out of the recording"
-                       if paused else sources)
-        elif monitoring:
-            header = "Testing input…"
-            rec_tag, rec_kind = "Testing", "info"
-            recmeta = sources
-        elif self.tx_mid:
-            header = "Transcribing…"
-            rec_tag, rec_kind = "Busy", "warn"
-            recmeta = ""
-        else:
-            header = "Idle"
-            rec_tag, rec_kind = "Idle", ""
-            recmeta = "Ready to record" if self.mic_idx is not None else "No microphone found"
-        self._js("notulaState", {
-            "recording": recording,
-            "paused": paused,
-            "monitoring": monitoring,
-            "elapsed": fmt_elapsed(elapsed),
-            "canRecord": (not recording and not monitoring and not self.tx_mid and self.mic_idx is not None),
-            "canTest": (not recording and not self.tx_mid and self.mic_idx is not None),
-            "txId": self.tx_mid,
-            "recId": self.rec_mid if recording else None,
-            "recName": self.rec_name if recording else None,
-            "live": {
-                "on": bool(self.cfg.get("live_enabled")),
-                "running": self.live is not None,
-                "ready": bool(self.live is not None and self.live.ready),
-                "status": self._live_status,
-                "model": self.cfg.get("live_model") or live.DEFAULT_MODEL,
-            },
-            "progress": self._tx_progress,
-            "header": header,
-            "recTag": rec_tag,
-            "recTagKind": rec_kind,
-            "recmeta": recmeta,
-        })
+    # ---- ObjC callbacks ----
+
+    def webView_didFinishNavigation_(self, web, nav):     # WKNavigationDelegate
+        self.core.on_page_loaded()
+
+    def userContentController_didReceiveScriptMessage_(self, ucc, message):
+        self.core.dispatch(message.body())
+
+    def windowWillClose_(self, note):                     # NSWindowDelegate
+        self.teardown()
+        AppHelper.stopEventLoop()
 
     # ---- heartbeat ----
 
     @objc.python_method
     def start_timer(self):
         # 0.1s base tick: live level meters need to be smooth; the heavier full
-        # state push is throttled to ~2 Hz below.
-        self._ticker = _Ticker.alloc().init().configure(self._tick)
+        # state push is throttled to ~2 Hz inside AppCore.tick().
+        self._ticker = _Ticker.alloc().init().configure(self.core.tick)
         self._nstimer = NSTimer.timerWithTimeInterval_target_selector_userInfo_repeats_(
             0.1, self._ticker, b"fire:", None, True)
         NSRunLoop.currentRunLoop().addTimer_forMode_(self._nstimer, NSRunLoopCommonModes)
-
-    @objc.python_method
-    def _tick(self):
-        self._tick_count += 1
-        # fast path: stream per-source levels to the meters while recording OR testing
-        src = self.rec if (self.rec is not None and self.rec.running) else self.monitor
-        if src is not None:
-            self._js("notulaLevels", src.levels())
-        # ~2 Hz: theme auto-switch + full state snapshot
-        if self._tick_count % 5 == 0:
-            mode, dark = self._resolve_theme()
-            if mode == "auto" and dark != self._last_dark:
-                self._apply_theme()
-            if (self.rec is not None and not self.rec.running
-                    and self.rec_mid is not None and not self._stopping):
-                self._finalize_dead_recorder()
-            self._push_state()
-
-    # ---- JS -> Python dispatch ----
-
-    def userContentController_didReceiveScriptMessage_(self, ucc, message):   # handler
-        body = message.body()
-        try:
-            action = str(body["action"])
-        except Exception:
-            return
-        try:
-            self._handle(action, body)
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            self._toast(f"Error: {e}", "err")
-
-    @objc.python_method
-    def _handle(self, action, body):
-        if action == "startRecording":
-            self._start_recording(str(body.get("name") or ""))
-        elif action == "stopRecording":
-            self._stop_recording()
-        elif action == "togglePause":
-            self._toggle_pause()
-        elif action == "setLive":
-            self._set_live(bool(body.get("value")))
-        elif action == "setLiveModel":
-            self._set_live_model(str(body.get("value") or ""))
-        elif action == "copyLive":
-            self._copy_live()
-        elif action == "transcribe":
-            self._transcribe(str(body.get("id") or ""),
-                             lang=body.get("lang"),
-                             min_speakers=body.get("min_speakers"),
-                             max_speakers=body.get("max_speakers"))
-        elif action == "toggleMonitor":
-            self._toggle_monitor()
-        elif action == "importAudio":
-            self._import_dialog()
-        elif action == "copyOutput":
-            self._copy_output(str(body.get("id") or ""))
-        elif action == "openOutput":
-            self._open_path(library.output_path(self.cfg["library"], str(body.get("id") or "")))
-        elif action == "reveal":
-            self._open_path(library.folder(self.cfg["library"], str(body.get("id") or "")))
-        elif action == "rename":
-            self._rename(str(body.get("id") or ""), str(body.get("name") or ""))
-        elif action == "delete":
-            self._delete(str(body.get("id") or ""))
-        elif action == "pickMic":
-            self._pick_mic(body.get("index"))
-        elif action == "setSystemCapture":
-            self._set_system_capture(bool(body.get("value")))
-        elif action == "setMute":
-            self._set_mute(str(body.get("kind") or ""), bool(body.get("muted")))
-        elif action == "setField":
-            self._set_field(str(body.get("key")), body.get("value"))
-        elif action == "setLang":
-            self._set_lang(str(body.get("value") or ""))
-        elif action == "setToken":
-            self._set_token(str(body.get("value") or ""))
-        elif action == "setAuto":
-            self.cfg["auto_transcribe"] = bool(body.get("value"))
-            config.save(self.cfg)
-        elif action == "systemHelp":
-            self._system_help()
-        elif action == "pickLibrary":
-            self._pick_library()
-        elif action == "openLibrary":
-            self._open_path(self.cfg["library"])
-        elif action == "refresh":
-            self._scan_devices()
-            self._push_init()
-            self._push_meetings()
-            self._toast("Refreshed")
-        elif action == "setTheme":
-            mode = str(body.get("mode") or "auto")
-            if mode in ("auto", "light", "dark"):
-                self.cfg["theme"] = mode
-                config.save(self.cfg)
-                self._apply_theme()
-        elif action == "quit":
-            self.win.close()
-
-    # ---- recording ----
-
-    @objc.python_method
-    def _ensure_mic(self, on_ok):
-        """Run on_ok() once microphone access is granted; otherwise guide the user.
-        Triggers the macOS prompt when the decision hasn't been made yet."""
-        st = permissions.mic_status()
-        if st == permissions.AUTHORIZED:
-            on_ok()
-        elif st == permissions.NOT_DETERMINED:
-            self._toast("Asking macOS for microphone access…")
-            permissions.request_mic(
-                lambda g: AppHelper.callAfter(self._mic_result, bool(g), on_ok))
-        else:
-            self._mic_denied()
-
-    @objc.python_method
-    def _mic_result(self, granted, on_ok):
-        if granted:
-            on_ok()
-        else:
-            self._mic_denied()
-
-    @objc.python_method
-    def _start_recording(self, name):
-        if self.rec is not None or self.tx_mid:
-            return
-        if self.monitor is not None:
-            self._stop_monitor()
-        if self.mic_idx is None:
-            self._toast("No microphone available", "err")
-            return
-        self._ensure_mic(lambda: self._begin_recording(name))
-
-    @objc.python_method
-    def _mic_denied(self):
-        self._toast("Microphone access is off. Opening System Settings › Privacy "
-                    "& Security › Microphone — turn it on for the app (or your "
-                    "terminal), then Record again.", "err")
-        permissions.open_privacy_pane("Microphone")
-
-    @objc.python_method
-    def _begin_recording(self, name):
-        root = self.cfg["library"]
-        mid = library.create_meeting(root, name, self._device_name(self.mic_idx))
-        folder = library.folder(root, mid)
-        specs = [{"kind": "mic", "index": self.mic_idx}]
-        if self.system_on:
-            if permissions.screen_recording_ok():
-                specs.append({"kind": "system", "sck": True})
-            else:
-                permissions.request_screen_recording()
-                self._toast("Grant Screen Recording (System Settings ▸ Privacy & "
-                            "Security ▸ Screen Recording), then record again to "
-                            "capture computer audio. Microphone only for now.", "warn")
-        engine = recorder.RecordingEngine(specs, folder)
-        for kind, muted in self._mute.items():
-            engine.set_mute(kind, muted)
-        try:
-            engine.start()
-        except Exception as e:
-            library.update_meta(root, mid, status=library.ERROR, warning=str(e))
-            self._toast(f"Could not start recording: {e}", "err")
-            self._push_meetings()
-            return
-        self.rec = engine
-        self.rec_mid = mid
-        self.rec_name = library.read_meta(root, mid).get("name") or ""
-        self.rec_seq += 1
-        self._live_lines, self._live_base, self._live_pending = [], [], ""
-        self._push_live()
-        if self.cfg.get("live_enabled"):
-            self._start_live()
-        self._push_state()
-        self._push_meetings()
-        # confirm audio is actually flowing (mic TCC / device busy) off the main thread
-        threading.Thread(target=self._await_start, args=(self.rec_seq,), daemon=True).start()
-
-    @objc.python_method
-    def _await_start(self, seq):
-        rec = self.rec                       # snapshot: main thread may clear self.rec
-        ok = rec.wait_until_started(6.0) if rec else False
-        AppHelper.callAfter(self._on_started, seq, ok)
-
-    @objc.python_method
-    def _on_started(self, seq, ok):
-        # a stop (or a superseding start) already in flight owns finalization.
-        # keyed on the session counter, not the id — a rename changes the id.
-        if self.rec_seq != seq or self.rec is None or self._stopping:
-            return
-        if ok:
-            src = "mic + computer audio" if self.system_on else "microphone"
-            self._toast(f"Recording {src}…", "ok")
-        else:
-            mid = self.rec_mid
-            self.rec, self.rec_mid, self.rec_name = None, None, ""
-            library.update_meta(self.cfg["library"], mid, status=library.ERROR,
-                                warning="recording did not start")
-            self._toast("Recording didn't start — allow microphone access for your "
-                        "terminal in System Settings › Privacy & Security › Microphone.", "err")
-            self._push_meetings()
-        self._push_state()
-
-    @objc.python_method
-    def _toggle_pause(self):
-        """Pause/resume the running recording. Paused time is dropped at the
-        capture callback, so it's absent from audio.wav and the timer freezes —
-        as opposed to Mute, which records silence and keeps the timeline."""
-        if self.rec is None or self.rec_mid is None or self._stopping:
-            return
-        if not self.rec.running:
-            return
-        paused = not self.rec.paused
-        self.rec.set_paused(paused)
-        library.update_meta(self.cfg["library"], self.rec_mid,
-                            status=library.PAUSED if paused else library.RECORDING)
-        self._toast("Paused — nothing is being recorded until you resume" if paused
-                    else "Recording again", "warn" if paused else "ok")
-        self._push_state()
-        self._push_meetings()
-
-    @objc.python_method
-    def _stop_recording(self):
-        if self.rec is None or self.rec_mid is None or self._stopping:
-            return
-        self._stopping = True
-        rec, mid = self.rec, self.rec_mid
-        self._stop_live(mid)      # detaches the tap and writes live.txt off-thread
-        self._toast("Finishing recording…")
-        threading.Thread(target=self._do_stop, args=(rec, mid), daemon=True).start()
-
-    @objc.python_method
-    def _do_stop(self, rec, mid):
-        final = rec.stop()
-        if os.path.exists(final):
-            duration = pipeline.probe_duration(pipeline.Path(final)) or rec.elapsed
-        else:
-            duration = rec.elapsed
-        AppHelper.callAfter(self._on_stopped, mid, duration)
-
-    @objc.python_method
-    def _on_stopped(self, mid, duration):
-        root = self.cfg["library"]
-        library.update_meta(root, mid, status=library.RECORDED, duration=duration)
-        self.rec, self.rec_mid, self.rec_name = None, None, ""
-        self._stopping = False
-        self._tx_progress = None
-        self._push_state()
-        self._push_meetings()
-        self._toast(f"Saved · {fmt_elapsed(duration)}", "ok")
-        if self.cfg.get("auto_transcribe"):
-            self._transcribe(mid)
-
-    @objc.python_method
-    def _finalize_dead_recorder(self):
-        """A capture stream ended on its own (device unplugged/seized). Salvage
-        whatever was written and settle the UI instead of wedging."""
-        rec, mid = self.rec, self.rec_mid
-        self._stop_live(mid)
-        self.rec, self.rec_mid, self.rec_name = None, None, ""
-        try:
-            final = rec.stop()
-            dur = pipeline.probe_duration(pipeline.Path(final)) if os.path.exists(final) else rec.elapsed
-        except Exception:
-            dur = 0.0
-        saved = bool(dur and dur > 0.5)
-        library.update_meta(self.cfg["library"], mid,
-                            status=library.RECORDED if saved else library.ERROR,
-                            duration=dur or 0,
-                            warning=None if saved else "input device stopped")
-        self._toast("Recording ended — input device stopped" if saved
-                    else "Recording lost — input device stopped",
-                    "warn" if saved else "err")
-        self._push_meetings()
-
-    # ---- live transcription (optional, toggleable at any time) ----
-
-    @objc.python_method
-    def _start_live(self):
-        """Attach the live tier to the running recording. Best-effort: any
-        failure reports through _live_status_cb and leaves recording alone."""
-        if self.live is not None or self.rec is None or not self.rec.running:
-            return
-        key = live.resolve_model(self.cfg.get("live_model") or live.DEFAULT_MODEL)
-        if key != self.cfg.get("live_model"):
-            self.cfg["live_model"] = key          # requested model isn't installed
-            config.save(self.cfg)
-        lt = live.LiveTranscriber(
-            key, self.cfg["lang"],
-            on_update=lambda lines, pend: AppHelper.callAfter(self._live_update, lines, pend),
-            on_status=lambda kind, msg: AppHelper.callAfter(self._live_status_cb, kind, msg),
-            # You/Them comes from the energy split between the two capture
-            # sources, so it's only meaningful when both are actually running.
-            attribute=bool(self.system_on),
-        )
-        self.live = lt
-        lt.start()
-        self.rec.set_tap(lt.feed)   # buffers while the model loads — no lost audio
-        self._push_state()
-
-    @objc.python_method
-    def _stop_live(self, mid=None):
-        """Detach the live tier and persist live.txt off the main thread."""
-        lt, self.live = self.live, None
-        if lt is None:
-            return
-        if self.rec is not None:
-            try:
-                self.rec.set_tap(None)
-            except Exception:
-                pass
-        self._live_base = list(self._live_lines)   # survive a model switch
-        self._live_status = ""
-        # snapshot the lines for the writer: starting another recording resets
-        # _live_lines on the main thread, and this thread outlives that
-        threading.Thread(target=self._finish_live,
-                         args=(lt, mid, list(self._live_lines)), daemon=True).start()
-
-    @objc.python_method
-    def _finish_live(self, lt, mid, lines):
-        try:
-            lt.stop()
-        except Exception:
-            pass
-        if not mid:
-            return
-        text = "\n".join(l["text"] if not l.get("who") else f"{l['who']}: {l['text']}"
-                         for l in lines if (l.get("text") or "").strip())
-        if not text.strip():
-            return
-        try:
-            with open(library.path(self.cfg["library"], mid, library.LIVE),
-                      "w", encoding="utf-8") as fh:
-                fh.write(text + "\n")
-        except OSError:
-            pass
-
-    @objc.python_method
-    def _live_update(self, lines, pending):        # main thread
-        self._live_lines = self._live_base + list(lines)
-        self._live_pending = pending
-        self._push_live()
-
-    @objc.python_method
-    def _live_status_cb(self, kind, msg):          # main thread
-        self._live_status = msg or ""
-        if kind == "error":
-            self._toast(f"Live transcript unavailable: {msg}", "warn")
-            self.live = None
-        self._push_state()
-
-    @objc.python_method
-    def _push_live(self):
-        # its own channel: the transcript changes on the live tier's cadence, not
-        # the 2 Hz UI heartbeat, and re-sending it at 2 Hz would be wasteful
-        self._js("notulaLive", {
-            "lines": self._live_lines[-80:],
-            "pending": self._live_pending,
-            "total": len(self._live_lines),
-        })
-
-    @objc.python_method
-    def _set_live(self, on):
-        self.cfg["live_enabled"] = bool(on)
-        config.save(self.cfg)
-        if on:
-            if self.rec is not None and self.rec.running:
-                if self.live is None:
-                    self._start_live()
-            else:
-                self._toast("Live transcript on — it starts with your next recording",
-                            "info")
-        else:
-            if self.live is not None:
-                self._stop_live(self.rec_mid)
-                self._toast("Live transcript off — the recording is unaffected", "info")
-        self._push_state()
-
-    @objc.python_method
-    def _set_live_model(self, key):
-        if key not in live.MODELS:
-            return
-        p = live.model_path(key)
-        if not p or not p.exists():
-            self._toast(f"{live.MODELS[key]['label']} isn't installed — download "
-                        f"{live.MODELS[key]['file']} into the whisper-cpp models "
-                        f"folder first.", "warn")
-            self._push_init()
-            return
-        if key == self.cfg.get("live_model"):
-            return
-        self.cfg["live_model"] = key
-        config.save(self.cfg)
-        self._push_init()
-        if self.live is not None:      # restart on the new model, keeping the text
-            self._stop_live(None)
-            self._toast(f"Switching live model to "
-                        f"{live.MODELS[key]['label'].split(' —')[0]}…", "info")
-            AppHelper.callAfter(self._start_live)
-        self._push_state()
-
-    @objc.python_method
-    def _copy_live(self):
-        text = "\n".join(l["text"] if not l.get("who") else f"{l['who']}: {l['text']}"
-                         for l in self._live_lines if (l.get("text") or "").strip())
-        if self._live_pending:
-            text = (text + "\n" + self._live_pending).strip()
-        if not text:
-            self._toast("Nothing transcribed yet", "warn")
-            return
-        pb = NSPasteboard.generalPasteboard()
-        pb.clearContents()
-        pb.setString_forType_(text, NSPasteboardTypeString)
-        self._toast("Live transcript copied", "ok")
-
-    # ---- input monitor (test devices without recording) ----
-
-    @objc.python_method
-    def _toggle_monitor(self):
-        if self.monitor is not None:
-            self._stop_monitor()
-            return
-        if self.rec is not None or self.tx_mid:
-            return
-        if self.mic_idx is None:
-            self._toast("No microphone available", "err")
-            return
-        self._ensure_mic(self._begin_monitor)
-
-    @objc.python_method
-    def _begin_monitor(self):
-        if self.monitor is not None or self.rec is not None:
-            return
-        specs = [{"kind": "mic", "index": self.mic_idx}]
-        if self.system_on and permissions.screen_recording_ok():
-            specs.append({"kind": "system", "sck": True})
-        eng = recorder.RecordingEngine(specs, self.cfg["library"], write=False)
-        for kind, muted in self._mute.items():
-            eng.set_mute(kind, muted)
-        try:
-            eng.start()
-        except Exception as e:
-            self._toast(f"Couldn't open input: {e}", "err")
-            return
-        self.monitor = eng
-        self._push_state()
-        self._toast("Testing input — the meters should move as sound comes in", "ok")
-
-    @objc.python_method
-    def _stop_monitor(self):
-        m, self.monitor = self.monitor, None
-        if m is not None:
-            try:
-                m.stop_streams()
-            except Exception:
-                pass
-        self._push_state()
-
-    # ---- import a pre-recorded file ----
-
-    @objc.python_method
-    def _import_dialog(self):
-        panel = NSOpenPanel.openPanel()
-        panel.setCanChooseFiles_(True)
-        panel.setCanChooseDirectories_(False)
-        panel.setAllowsMultipleSelection_(False)
-        panel.setTitle_("Import a recording to transcribe")
-        panel.setAllowedFileTypes_(list(MEDIA_EXTS))
-        if panel.runModal() == 1:
-            self._import_path(panel.URLs()[0].path())
-
-    @objc.python_method
-    def _import_path(self, path):
-        if not path or not os.path.exists(path):
-            self._toast("File not found", "warn")
-            return
-        ext = os.path.splitext(path)[1].lstrip(".").lower()
-        if ext not in MEDIA_EXTS:
-            self._toast(f"“{os.path.basename(path)}” isn't an audio or video file", "warn")
-            return
-        if self.tx_mid or self.rec is not None:
-            self._toast("Busy — finish the current task first", "warn")
-            return
-        name = os.path.splitext(os.path.basename(path))[0]
-        root = self.cfg["library"]
-        mid = library.create_meeting(root, name, "imported")
-        library.update_meta(root, mid, status=library.IMPORTING)
-        self._push_meetings()
-        self._toast(f"Importing “{name}”…")
-        threading.Thread(target=self._do_import, args=(mid, path), daemon=True).start()
-
-    @objc.python_method
-    def _do_import(self, mid, path):
-        wav = library.audio_path(self.cfg["library"], mid)
-        ok, err = pipeline.convert_to_wav(path, wav)
-        dur = pipeline.probe_duration(pipeline.Path(wav)) if ok and os.path.exists(wav) else 0.0
-        AppHelper.callAfter(self._import_done, mid, ok, dur, err)
-
-    @objc.python_method
-    def _import_done(self, mid, ok, dur, err):
-        if ok:
-            library.update_meta(self.cfg["library"], mid,
-                                status=library.RECORDED, duration=dur)
-            self._toast(f"Imported · {fmt_elapsed(dur)} — ready to transcribe", "ok")
-        else:
-            library.update_meta(self.cfg["library"], mid,
-                                status=library.ERROR, warning=err or "import failed")
-            self._toast(f"Import failed: {err}", "err")
-        self._push_meetings()
-
-    # ---- transcription ----
-
-    @objc.python_method
-    def _transcribe(self, mid, lang=None, min_speakers=None, max_speakers=None):
-        if not mid or self.tx_mid or self.rec is not None:
-            return
-        # per-transcription settings from the dialog also become the saved defaults
-        changed = False
-        if lang:
-            self.cfg["lang"] = str(lang).strip()[:8] or "id"
-            changed = True
-        for key, val in (("min_speakers", min_speakers), ("max_speakers", max_speakers)):
-            if val is not None:
-                lo, hi = config._NUM_BOUNDS[key]
-                try:
-                    self.cfg[key] = min(hi, max(lo, int(val)))
-                    changed = True
-                except (TypeError, ValueError):
-                    pass
-        if changed:
-            config.save(self.cfg)
-        root = self.cfg["library"]
-        wav = library.audio_path(root, mid)
-        if not os.path.exists(wav):
-            self._toast("No recording found for that meeting", "err")
-            return
-        self.tx_mid = mid
-        self._tx_progress = {"id": mid, "frac": 0.0, "msg": "starting…"}
-        library.update_meta(root, mid, status=library.TRANSCRIBING, warning=None)
-        self._push_state()
-        self._push_meetings()
-        threading.Thread(target=self._do_transcribe, args=(mid, wav), daemon=True).start()
-
-    @objc.python_method
-    def _do_transcribe(self, mid, wav):
-        root = self.cfg["library"]
-        out_dir = library.folder(root, mid)
-        token = config.hf_token(self.cfg)
-
-        def on_progress(stage, frac, msg):        # WORKER thread
-            AppHelper.callAfter(self._tx_progress_update, mid, frac, msg)
-
-        try:
-            result = pipeline.transcribe_meeting(
-                wav, out_dir,
-                lang=self.cfg["lang"],
-                min_speakers=self.cfg["min_speakers"] or None,
-                max_speakers=self.cfg["max_speakers"] or None,
-                model=self.cfg["model"],
-                hf_token=token,
-                diarize=True,
-                progress_cb=on_progress,
-                on_proc=self._set_tx_proc,
-            )
-            AppHelper.callAfter(self._tx_done, mid, result)
-        except pipeline.PipelineError as e:
-            AppHelper.callAfter(self._tx_failed, mid, str(e))
-        except Exception as e:                     # pragma: no cover
-            AppHelper.callAfter(self._tx_failed, mid, f"unexpected error: {e}")
-
-    @objc.python_method
-    def _set_tx_proc(self, proc):
-        self._tx_proc = proc     # worker thread; plain assignment so teardown can kill it
-
-    @objc.python_method
-    def _tx_progress_update(self, mid, frac, msg):
-        if self.tx_mid == mid:
-            self._tx_progress = {"id": mid, "frac": frac, "msg": msg}
-
-    @objc.python_method
-    def _tx_done(self, mid, result):
-        root = self.cfg["library"]
-        library.update_meta(
-            root, mid, status=library.TRANSCRIBED,
-            duration=result.get("duration") or 0,
-            diarized=bool(result.get("diarized")),
-            warning=result.get("warning"),
-        )
-        self.tx_mid = None
-        self._tx_progress = None
-        self._tx_proc = None
-        self._push_state()
-        self._push_meetings()
-        if result.get("diarized"):
-            self._toast("Transcribed with speakers ✓", "ok")
-        else:
-            why = result.get("warning") or "no diarization"
-            low = why.lower()
-            if any(k in low for k in ("auth", "token", "401", "403", "gated", "permission")):
-                self._toast("Transcribed, but diarization couldn't authenticate — "
-                            "check your token and that you accepted the model terms "
-                            "at huggingface.co/pyannote/speaker-diarization-community-1.",
-                            "warn")
-            else:
-                self._toast(f"Transcribed (plain — {why})", "warn")
-
-    @objc.python_method
-    def _tx_failed(self, mid, err):
-        library.update_meta(self.cfg["library"], mid, status=library.ERROR,
-                            warning=err.splitlines()[0] if err else "failed")
-        self.tx_mid = None
-        self._tx_progress = None
-        self._tx_proc = None
-        self._push_state()
-        self._push_meetings()
-        self._toast(f"Transcription failed: {err.splitlines()[0] if err else ''}", "err")
-
-    # ---- meeting actions ----
-
-    @objc.python_method
-    def _copy_output(self, mid):
-        p = library.output_path(self.cfg["library"], mid)
-        if not os.path.exists(p):
-            self._toast("No output.txt yet", "warn")
-            return
-        try:
-            text = open(p, encoding="utf-8").read()
-        except OSError as e:
-            self._toast(f"Could not read output: {e}", "err")
-            return
-        pb = NSPasteboard.generalPasteboard()
-        pb.clearContents()
-        pb.setString_forType_(text, NSPasteboardTypeString)
-        self._toast("Copied output.txt to clipboard", "ok")
-
-    @objc.python_method
-    def _open_path(self, path):
-        if not path or not os.path.exists(path):
-            self._toast("Not found", "warn")
-            return
-        subprocess.Popen(["open", path])
-
-    @objc.python_method
-    def _rename(self, mid, name):
-        """Rename a meeting — its display name and the folder it's saved in.
-
-        Renaming the in-progress recording is explicitly supported: the folder
-        moves out from under the open WAV handles (which keep writing into it),
-        and the engine is repointed so the mixdown at stop lands in the renamed
-        session. A meeting that a *subprocess* is writing into (transcribing,
-        importing) or one already being finalized can't move, so those wait.
-        """
-        root = self.cfg["library"]
-        name = library.clean_name(name)
-        if not mid:
-            return
-        if not name:
-            self._toast("A meeting needs a name", "warn")
-            self._push_meetings()
-            return
-        meta = library.read_meta(root, mid)
-        if not meta:
-            self._toast("That meeting no longer exists", "warn")
-            self._push_meetings()
-            return
-        if name == (meta.get("name") or ""):
-            self._push_meetings()          # no-op: just resync the row
-            return
-
-        live = (mid == self.rec_mid and self.rec is not None and not self._stopping)
-        if (mid == self.tx_mid or meta.get("status") == library.IMPORTING
-                or (mid == self.rec_mid and not live)):
-            self._toast("That meeting is busy — rename it once it finishes.", "warn")
-            self._push_meetings()
-            return
-
-        try:
-            new_mid = library.rename_meeting(root, mid, name)
-        except (OSError, ValueError) as e:
-            self._toast(f"Rename failed: {e}", "err")
-            self._push_meetings()
-            return
-
-        if live:
-            self.rec.relocate(library.folder(root, new_mid))
-            self.rec_mid = new_mid
-            self.rec_name = name
-        self._toast(f"Renamed to “{name}”" + (" — the recording follows" if live else ""),
-                    "ok")
-        self._push_state()
-        self._push_meetings()
-
-    @objc.python_method
-    def _delete(self, mid):
-        if not mid or mid in (self.rec_mid, self.tx_mid):
-            self._toast("That meeting is busy", "warn")
-            return
-        folder = library.folder(self.cfg["library"], mid)
-        if not os.path.isdir(folder):
-            return
-        meta = library.read_meta(self.cfg["library"], mid)
-        if not self._confirm(f"Delete “{meta.get('name', mid)}” and its recording?",
-                             "This permanently removes the folder and cannot be undone."):
-            return
-        try:
-            shutil.rmtree(folder)
-            self._toast("Deleted")
-        except OSError as e:
-            self._toast(f"Delete failed: {e}", "err")
-        self._push_meetings()
-
-    @objc.python_method
-    def _confirm(self, message, info=""):
-        alert = NSAlert.alloc().init()
-        alert.setMessageText_(message)
-        if info:
-            alert.setInformativeText_(info)
-        alert.addButtonWithTitle_("Delete")
-        alert.addButtonWithTitle_("Cancel")
-        return alert.runModal() == 1000    # NSAlertFirstButtonReturn
-
-    # ---- settings ----
-
-    @objc.python_method
-    def _pick_mic(self, index):
-        try:
-            self.cfg["mic_device"] = int(index)
-        except (TypeError, ValueError):
-            self.cfg["mic_device"] = None
-        self._resolve_selection()
-        config.save(self.cfg)
-
-    @objc.python_method
-    def _set_system_capture(self, on):
-        self.cfg["system_capture"] = bool(on)
-        config.save(self.cfg)
-        self._resolve_selection()
-        if on and sysaudio.AVAILABLE and not permissions.screen_recording_ok():
-            permissions.request_screen_recording()
-            self._toast("Computer audio uses Screen Recording — grant it in System "
-                        "Settings, then it captures on your next recording.", "info")
-        self._push_state()
-
-    @objc.python_method
-    def _set_mute(self, kind, muted):
-        if kind not in ("mic", "system"):
-            return
-        self._mute[kind] = muted
-        for eng in (self.rec, self.monitor):
-            if eng is not None:
-                eng.set_mute(kind, muted)
-
-    @objc.python_method
-    def _set_field(self, key, value):
-        if key not in ("min_speakers", "max_speakers"):
-            return
-        lo, hi = config._NUM_BOUNDS[key]
-        try:
-            v = int(round(float(value)))
-        except (TypeError, ValueError):
-            self._js("notulaField", key, self.cfg[key])
-            self._toast(f"{key.replace('_', ' ')} must be a number", "warn")
-            return
-        v = min(hi, max(lo, v))
-        self.cfg[key] = v
-        config.save(self.cfg)
-        self._js("notulaField", key, v)
-
-    @objc.python_method
-    def _set_lang(self, value):
-        value = (value or "").strip()[:8] or "id"
-        self.cfg["lang"] = value
-        config.save(self.cfg)
-
-    @objc.python_method
-    def _set_token(self, value):
-        value = (value or "").strip()
-        # ignore the masked placeholder echoed back unchanged
-        if value and set(value) == {"•"}:
-            return
-        self.cfg["hf_token"] = value
-        config.save(self.cfg)
-        self._push_init()
-        self._toast("Token saved" if value else "Token cleared",
-                    "ok" if value else "info")
-
-    @objc.python_method
-    def _pick_library(self):
-        panel = NSOpenPanel.openPanel()
-        panel.setCanChooseFiles_(False)
-        panel.setCanChooseDirectories_(True)
-        panel.setAllowsMultipleSelection_(False)
-        panel.setPrompt_("Use folder")
-        if panel.runModal() == 1:
-            path = panel.URLs()[0].path()
-            self.cfg["library"] = path
-            config.save(self.cfg)
-            library.ensure_root(path)
-            self._push_init()
-            self._push_meetings()
-            self._toast("Library folder set", "ok")
-
-    @objc.python_method
-    def _system_help(self):
-        alert = NSAlert.alloc().init()
-        alert.setMessageText_("Capturing computer audio")
-        alert.setInformativeText_(
-            "macOS can't record system / other-participant audio without a "
-            "loopback audio driver. To set it up:\n\n"
-            "1.  Install BlackHole:   brew install blackhole-2ch\n"
-            "2.  In Audio MIDI Setup, create an Aggregate Device combining your "
-            "microphone + BlackHole 2ch.\n"
-            "3.  Create a Multi-Output Device (BlackHole + your speakers) and set "
-            "it as the system output, so meeting audio plays into BlackHole while "
-            "you still hear it.\n"
-            "4.  Back in Notula, choose BlackHole (or the Aggregate) as the "
-            "Computer audio device.\n\n"
-            "Full steps are in the README.")
-        alert.addButtonWithTitle_("OK")
-        alert.runModal()
 
     # ---- teardown ----
 
     @objc.python_method
     def teardown(self):
-        if self._torn:
-            return
-        self._torn = True
         if self._nstimer is not None:
             self._nstimer.invalidate()
-        lt, self.live = self.live, None      # don't orphan whisper-server on quit
-        if lt is not None:
-            try:
-                lt.stop(timeout=2.0)
-            except Exception:
-                pass
-        if self.monitor is not None:
-            try:
-                self.monitor.stop_streams()
-            except Exception:
-                pass
-        if self.rec is not None and self.rec.running:
-            try:
-                self.rec.stop()     # finalize the WAV so a recording isn't lost on quit
-            except Exception:
-                pass
-        p = self._tx_proc           # don't orphan a running whisper/diarize on quit
-        if p is not None and p.poll() is None:
-            try:
-                os.killpg(os.getpgid(p.pid), signal.SIGTERM)
-            except Exception:
-                try:
-                    p.terminate()
-                except Exception:
-                    pass
+            self._nstimer = None
+        self.core.teardown()
         try:
             self.ucc.removeScriptMessageHandlerForName_(HANDLER)
         except Exception:
             pass
-
-    def windowWillClose_(self, note):                 # NSWindowDelegate
-        self.teardown()
-        AppHelper.stopEventLoop()
 
 
 class AppDelegate(NSObject):
@@ -1269,7 +245,7 @@ class AppDelegate(NSObject):
         if b is not None:
             for f in files:
                 try:
-                    b._import_path(str(f))
+                    b.core.import_path(str(f))
                 except Exception:
                     pass
         try:
@@ -1327,7 +303,7 @@ class DropWebView(WKWebView):
     def performDragOperation_(self, sender):
         path = self._dropped_file(sender)
         if path and getattr(self, "_bridge", None) is not None:
-            self._bridge._import_path(path)
+            self._bridge.core.import_path(path)
             return True
         return False
 
@@ -1418,35 +394,13 @@ def main():
         bridge.teardown()
 
 
-def _selftest(wav):
-    """Headless end-to-end check of the AI pipeline — run the SAME transcribe +
-    diarize path the GUI uses, but with no window. Used to verify a built .app
-    can still find whisper-cli, the transcription venv, the diarize script, and
-    the models.  Usage:  Notula.app/Contents/MacOS/Notula --selftest audio.wav"""
-    if not wav or not os.path.exists(wav):
-        print("SELFTEST: pass a path to a wav file"); return 2
-    cfg = config.load()
-    token = config.hf_token(cfg)
-    print(f"SELFTEST: frozen={getattr(sys, 'frozen', False)}")
-    print(f"SELFTEST: whisper-cli   {pipeline.WHISPER_CLI}  exists={os.path.exists(pipeline.WHISPER_CLI)}")
-    print(f"SELFTEST: diarize script {pipeline.DIARIZE_SCRIPT}  exists={pipeline.DIARIZE_SCRIPT.exists()}")
-    print(f"SELFTEST: tx python      {pipeline.TX_PYTHON}  exists={os.path.exists(str(pipeline.TX_PYTHON))}")
-    print(f"SELFTEST: hf token set   {bool(token)}")
-    outdir = os.path.join(os.path.dirname(os.path.abspath(wav)), "selftest_out")
-    try:
-        res = pipeline.transcribe_meeting(
-            wav, outdir, lang=cfg["lang"], hf_token=token,
-            progress_cb=lambda s, f, m: print(f"SELFTEST: {s:<10} {f:4.0%} {m}"))
-        print(f"SELFTEST: diarized={res['diarized']} warning={res['warning']}")
-        print(f"SELFTEST: output={res['output']}")
-        print("SELFTEST: OK")
-        return 0
-    except Exception as e:
-        print(f"SELFTEST: FAILED: {e}")
-        return 1
+# shared with the Windows build — see appcore.selftest
+_selftest = appcore.selftest
 
 
 if __name__ == "__main__":
+    if "--install-deps" in sys.argv:
+        sys.exit(appcore.install_deps_cli("--live" in sys.argv))
     if "--selftest" in sys.argv:
         i = sys.argv.index("--selftest")
         arg = sys.argv[i + 1] if i + 1 < len(sys.argv) else None

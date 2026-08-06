@@ -1,10 +1,11 @@
 """
 notula.config — user settings, stored as one JSON file that can never brick launch.
 
-Config lives at ~/.config/notula/notula.json (honoring $XDG_CONFIG_HOME). Every
-load starts from DEFAULTS, overlays the file, and coerces every value back into
-range, so a hand-edited or half-written file falls back to sane values instead
-of crashing the app. Writes are atomic (tempfile + os.replace) and owner-only.
+Config lives at ~/.config/notula/notula.json (honoring $XDG_CONFIG_HOME), or
+%APPDATA%\\Notula\\notula.json on Windows. Every load starts from DEFAULTS,
+overlays the file, and coerces every value back into range, so a hand-edited or
+half-written file falls back to sane values instead of crashing the app. Writes
+are atomic (tempfile + os.replace) and owner-only.
 """
 
 from __future__ import annotations
@@ -15,13 +16,17 @@ import sys
 import json
 import tempfile
 
+import osutil
+
 APP = "notula"
 
 
 # ---- defaults -----------------------------------------------------------------
 
 def _default_library() -> str:
-    return os.path.expanduser("~/Documents/Notula")
+    # not ~/Documents: on Windows that folder is localized and often redirected
+    # into OneDrive, and only the shell knows where it really is
+    return os.path.join(osutil.documents_dir(), "Notula")
 
 
 DEFAULTS = {
@@ -54,8 +59,7 @@ _ENUMS = {
 # ---- paths --------------------------------------------------------------------
 
 def config_path() -> str:
-    base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
-    return os.path.join(base, APP, f"{APP}.json")
+    return os.path.join(osutil.config_dir(APP), f"{APP}.json")
 
 
 # ---- load / sanitize / save ---------------------------------------------------

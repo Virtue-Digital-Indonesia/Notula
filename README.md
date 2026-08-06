@@ -1,9 +1,13 @@
 # Notula
 
 Record meetings, then transcribe + diarize them into a clean, speaker-labeled
-`output.txt` you can process further. A small native macOS app: an IBM Carbon UI
-in a WKWebView over a Python engine that drives `ffmpeg`, `whisper-cli`, and
-`pyannote`.
+`output.txt` you can process further. A small native app for **macOS and
+Windows**: an IBM Carbon UI in the system web view over a Python engine that
+drives `ffmpeg`, `whisper-cli`, and `pyannote`.
+
+One app, two shells — `appcore.py` holds all the behaviour and knows nothing
+about either OS; `notula.py` wraps it in a WKWebView, `notula_win.py` in a
+WebView2. Windows setup lives in [docs/windows.md](docs/windows.md).
 
 It's the [`transcribe.sh`](../CKB—Initial/transcribe.sh) pipeline with a record
 button and a library in front of it.
@@ -77,6 +81,8 @@ transcribe.
 
 ## Requirements
 
+### macOS
+
 Homebrew tools (you already have these from `transcribe.sh`):
 
 ```bash
@@ -97,29 +103,72 @@ curl -L -o "$M/ggml-small.bin" \
   https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin
 ```
 
+### Windows
+
+Windows 10 1903+ / 11, the [WebView2
+Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) (already there
+on Win11), and Python 3.11+. There's no package manager to lean on, so the app
+fetches ffmpeg, whisper.cpp and the models itself, into `%LOCALAPPDATA%\Notula` —
+a folder it checks before `PATH`. Full walkthrough:
+**[docs/windows.md](docs/windows.md)**.
+
+No permission to grant for computer audio here, and no relaunch: WASAPI loopback
+needs neither.
+
+### Both
+
 Two Python environments — this is deliberate:
 
-- **App venv** (`./.venv`) — `pyobjc` for the window plus `sounddevice` + `numpy`
-  for real-time capture/levels/mute. Created automatically by `run.command`, or:
-  `python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt`
-- **Transcription venv** — `torch` / `pyannote` / `soundfile`. This is the
-  existing `../.venv` (the openai-whisper project venv). Notula shells out to it
-  for diarization so the heavy ML deps stay out of the GUI. Override the path in
-  `pipeline.py` (`TX_PYTHON`) if yours lives elsewhere.
+- **App venv** (`./.venv`) — the window (`pyobjc` on macOS, `pywebview` on
+  Windows) plus `sounddevice` + `numpy` for real-time capture/levels/mute.
+  Created automatically by `run.command` / `run.bat`, or by hand from
+  `requirements.txt` / `requirements-win.txt`.
+- **Transcription venv** — `torch` / `pyannote` / `soundfile`. On macOS this is
+  the existing `../.venv` (the openai-whisper project venv). Notula shells out to
+  it for diarization so the heavy ML deps stay out of the GUI. Point
+  `$NOTULA_TX_PYTHON` at yours if it lives elsewhere.
+
+Every external path is resolved by `toolpaths.py` and overridable by environment
+variable — `NOTULA_BIN`, `NOTULA_MODELS_DIR`, `NOTULA_WHISPER_CLI`,
+`NOTULA_FFMPEG`, `NOTULA_TX_PYTHON`.
+
+**You don't have to install those by hand.** If anything is missing, a notice in
+the app offers to fetch it — ffmpeg, the whisper binaries and the models — with a
+progress bar and a Stop button; downloads resume rather than restart. On Windows
+everything is downloaded; on macOS the binaries go through Homebrew (whisper.cpp
+publishes no macOS build) and the models are downloaded directly. Same thing
+without a window:
+
+```bash
+./.venv/bin/python notula.py --install-deps        # macOS
+.venv\Scripts\python notula_win.py --install-deps  REM Windows
+```
 
 ## Run
 
 ```bash
-./run.command        # double-click in Finder, or run from a terminal
+./run.command        # macOS — double-click in Finder, or run from a terminal
+```
+```bat
+run.bat              REM Windows — double-click, or run.bat --debug for a console
 ```
 
-## Build the app / DMG
+Verify the whole AI pipeline (whisper + diarize) headlessly on either platform:
+
+```bash
+./.venv/bin/python notula.py --selftest some.wav        # prints SELFTEST: OK
+.venv\Scripts\python notula_win.py --selftest some.wav
+```
+
+## Build the app
+
+### macOS — .app / DMG
 
 ```bash
 ./.venv/bin/pip install py2app          # once
 ./.venv/bin/python tools/make_icns.py   # regenerate the icon (once / on icon change)
 ./.venv/bin/python setup.py py2app      # -> dist/Notula.app  (launches as "Notula")
-./tools/build_dmg.sh                    # -> dist/Notula-1.3.dmg (drag to Applications)
+./tools/build_dmg.sh                    # -> dist/Notula-2.0.0-beta1.dmg (drag to Applications)
 ```
 
 Verify the bundle's whole AI pipeline (whisper + diarize) without the GUI:
@@ -127,6 +176,18 @@ Verify the bundle's whole AI pipeline (whisper + diarize) without the GUI:
 ```bash
 dist/Notula.app/Contents/MacOS/Notula --selftest some.wav   # prints SELFTEST: OK
 ```
+
+### Windows — .exe / installer
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\build_windows.ps1
+```
+
+PyInstaller builds `dist\Notula\Notula.exe`; if Inno Setup 6 is installed it also
+packages `dist\Notula-Setup-2.0.0-beta1.exe` — per-user, no admin prompt, installs the
+WebView2 Runtime if missing, and offers to fetch ffmpeg/whisper/models on its
+finish page. The same "bundles the window, not the transcription stack" split
+applies — see [docs/windows.md](docs/windows.md).
 
 **What the bundle contains vs needs.** `Notula.app` embeds its own Python + the
 GUI/recording stack (pyobjc, sounddevice, ScreenCaptureKit, numpy). It does **not**
@@ -152,11 +213,13 @@ still needs a right-click → **Open** once.
 **First launch.** On launch Notula prompts for **Microphone** and **Screen
 Recording** (grant to *Notula*). ⚠️ **After granting Screen Recording, quit and
 reopen Notula** — macOS only activates that permission on a relaunch. After that
-it stops asking and computer-audio capture works.
+it stops asking and computer-audio capture works. (None of this applies on
+Windows: there's no signing, and loopback capture needs no permission.)
 
 ## Output
 
-Each meeting folder (`~/Documents/Notula/<date>_<name>/`):
+Each meeting folder (`~/Documents/Notula/<date>_<name>/`, or
+`Documents\Notula\` on Windows):
 
 | file | what |
 |---|---|
@@ -173,8 +236,8 @@ with `grep -v '^#'`.
 
 ## Settings
 
-Stored privately in `~/.config/notula/notula.json` (owner-only). Editable in the
-app's Settings panel:
+Stored privately in `~/.config/notula/notula.json` (owner-only), or
+`%APPDATA%\Notula\notula.json`. Editable in the app's Settings panel:
 
 - **Language** — whisper code (`id`, `en`, …)
 - **Min/Max speakers** — `0` = auto-detect
@@ -185,56 +248,88 @@ app's Settings panel:
 
 ## The two audio sources
 
-- **Microphone** — a PortAudio input device (pick which one). The first time you
-  record, macOS prompts for **Microphone** access; without it, capture is silent.
-- **Computer audio** — the other participants / any system audio, captured with
-  **ScreenCaptureKit** (the same API OBS uses for desktop audio). **No loopback
-  driver** (BlackHole etc.) is needed. It requires the **Screen Recording**
-  ("Screen & System Audio Recording") permission — macOS asks the first time,
-  and you may need to relaunch Notula once after granting it. Toggle it off if
-  you only want your mic.
+- **Microphone** — a PortAudio input device (pick which one). Opened at 16 kHz
+  mono where the OS allows it (always, on CoreAudio) and otherwise at the
+  device's own rate and converted in-process.
+- **Computer audio** — the other participants / any system audio. **No loopback
+  driver** (BlackHole, VB-Cable…) is needed on either platform:
+
+  | | how | permission |
+  |---|---|---|
+  | macOS | ScreenCaptureKit — the same API OBS uses for desktop audio | **Screen Recording**, plus one relaunch after granting |
+  | Windows | WASAPI loopback on the default playback device | none |
+
+  Toggle it off if you only want your mic. On Windows it follows the default
+  playback device, so if you switch output mid-meeting, restart the recording.
 
 Each source has its own **live waveform + level meter** and **Mute** button. The
 two are recorded to separate WAVs and mixed to `audio.wav` on stop.
 
 ### Permissions, in short
 
-| Source | Permission | Prompted |
+| | macOS | Windows |
 |---|---|---|
-| Microphone | Privacy › Microphone | **on launch** (and before recording) |
-| Computer audio | Privacy › Screen Recording | **on launch** when the source is on |
+| Microphone | TCC prompt on launch and before recording | a Settings toggle — Windows never prompts, it just records silence |
+| Computer audio | Privacy › Screen Recording, prompted on launch | nothing to grant |
 
-Notula checks both on startup and prompts for whatever hasn't been decided; if a
-permission is off it points you to the right System Settings pane. (macOS only
-prompts once — after that you toggle it in System Settings, and Screen Recording
-changes need an app relaunch.)
+Notula checks on startup and prompts for whatever hasn't been decided; if a
+permission is off it points you at the right Settings pane. macOS only prompts
+once — after that you toggle it in System Settings, and Screen Recording changes
+need an app relaunch.
 
-Because Notula currently runs as plain `python3`, the prompt is attributed to the
-launching app (Terminal / iTerm / your IDE). Grant it there. A signed `.app`
-bundle (not built yet) would prompt as "Notula" and remember it per-app.
-
-## Microphone permission
-
-The first recording triggers a macOS microphone prompt **for the terminal app**
-that launched Notula (Terminal, iTerm, VS Code…), since it runs as plain
-`python3`. Allow it there. Bundling a signed `.app` later (not done yet) makes the
-prompt appear as "Notula" instead.
+If you run from source rather than a bundle, macOS attributes the prompt to the
+launching app (Terminal / iTerm / your IDE), so grant it there. The signed `.app`
+prompts as "Notula" and remembers it per-app — which is exactly why
+`build_dmg.sh` signs with a stable identity.
 
 ## Files
 
 ```
-notula.py             app shell + WKWebView bridge + orchestration
+appcore.py            the whole app — every behaviour, no platform code
+notula.py             macOS shell: NSWindow + WKWebView + native services
+notula_win.py         Windows shell: WebView2 (pywebview) + Win32/tkinter services
+assets/notula_ui.html Carbon UI (single file, both platforms)
+assets/fonts/         IBM Plex (base64, inlined at load)
+
 recorder.py           mic capture engine (sounddevice) + per-source levels/mute/mix
-sysaudio.py           computer-audio capture via ScreenCaptureKit (no loopback driver)
-permissions.py        macOS mic (AVFoundation) + screen-recording (Quartz) TCC helpers
+sysaudio.py           computer audio — dispatches to the platform backend
+  sysaudio_mac.py       ScreenCaptureKit
+  sysaudio_win.py       WASAPI loopback (PyAudioWPatch)
+permissions.py        mic / system-audio privacy — dispatches per platform
+  permissions_mac.py    AVFoundation + Quartz TCC
+  permissions_win.py    consent registry + ms-settings deep links
+deps.py               in-app download of ffmpeg / whisper / models, both platforms
+dsp.py                downmix + windowed-sinc resampling to 16 kHz (Windows capture)
+osutil.py             config dirs, subprocess flags, kill-tree, open path
+toolpaths.py          finds ffmpeg / whisper / models / tx-venv per platform
+
+library.py            meeting folders + meta.json
+pipeline.py           whisper-cli + diarize + merge (stdlib only; shells out)
+live.py               near-realtime transcript via whisper-server
+diarize_and_merge.py  pyannote diarization (runs in the transcription venv)
+config.py             settings (~/.config/notula/ or %APPDATA%\Notula\)
+
 appicon.py            the Dock/menu icon (waveform tile), drawn at runtime
 setup.py              py2app build config (Notula.app)
 tools/make_icns.py    render assets/Notula.icns from appicon
+tools/make_ico.py     render assets/Notula.ico (the Windows icon) from the same
 tools/build_dmg.sh    package Notula.app into a distributable .dmg
-library.py            meeting folders + meta.json
-pipeline.py           whisper-cli + diarize + merge (stdlib only; shells out)
-diarize_and_merge.py  pyannote diarization (runs in the transcription venv)
-config.py             settings (~/.config/notula/notula.json)
-assets/notula_ui.html Carbon UI (single file)
-assets/fonts/         IBM Plex (base64, inlined at load)
+tools/notula_win.spec PyInstaller build config (Notula.exe)
+tools/installer.iss   Inno Setup config (Notula-Setup-2.0.0-beta1.exe)
+tools/build_windows.ps1  build the .exe + installer in one command
+tools/setup_windows.ps1  fetch ffmpeg / whisper.cpp / models on Windows
+docs/windows.md       Windows setup, packaging, and what's still untested
+tests/run_all.py      the suites — resampler, appcore, Windows shell threading
 ```
+
+## Tests
+
+```bash
+./.venv/bin/python tests/run_all.py     # macOS
+.venv\Scripts\python tests\run_all.py   REM Windows
+```
+
+Plain scripts, no framework. They cover the resampler, the whole `AppCore`
+dispatch surface (against a stub host), and the Windows shell's threading model —
+none of which needs an audio device, so they're meaningful on both platforms.
+For anything that does touch hardware, `--selftest` runs the real pipeline.

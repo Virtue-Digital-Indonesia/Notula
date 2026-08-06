@@ -21,6 +21,7 @@ import json
 import os
 import re
 import tempfile
+import time
 from datetime import datetime
 
 # status values
@@ -96,6 +97,26 @@ def read_meta(root: str, mid: str) -> dict:
     return {}
 
 
+def _replace_with_retry(tmp: str, dst: str, attempts: int = 5) -> None:
+    """os.replace, retried briefly.
+
+    On POSIX, rename(2) simply cannot fail because someone has the destination
+    open. On Windows it is MoveFileExW, which returns a sharing violation
+    whenever anything holds the destination without FILE_SHARE_DELETE — a search
+    indexer, a backup agent, or an antivirus scanner that opened meta.json the
+    moment we created it. Those holds last milliseconds, so retrying turns a hard
+    failure into a hiccup instead of a lost status update.
+    """
+    for i in range(attempts):
+        try:
+            os.replace(tmp, dst)
+            return
+        except PermissionError:
+            if i == attempts - 1:
+                raise
+            time.sleep(0.05 * (i + 1))
+
+
 def write_meta(root: str, mid: str, meta: dict) -> None:
     p = _meta_file(root, mid)
     d = os.path.dirname(p)
@@ -106,7 +127,7 @@ def write_meta(root: str, mid: str, meta: dict) -> None:
             json.dump(meta, fh, indent=2, ensure_ascii=False)
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(tmp, p)
+        _replace_with_retry(tmp, p)
     except Exception:
         try:
             os.unlink(tmp)
@@ -149,17 +170,22 @@ def create_meeting(root: str, name: str, device_name: str = "") -> str:
     return mid
 
 
-def rename_meeting(root: str, mid: str, name: str) -> str:
+def rename_meeting(root: str, mid: str, name: str, move: bool = True) -> str:
     """Rename a meeting: update meta['name'] *and* move the folder so the saved
     session on disk carries the new name. Returns the (possibly new) id.
 
     The timestamp prefix is kept, so the library keeps sorting newest-first and
     the meeting's identity in time is preserved.
 
-    This is safe to do while a recording is in flight: renaming a directory
-    moves the inode, and already-open WAV handles keep writing into it. The
-    caller only has to repoint the paths it will use *later* — see
+    On POSIX this is safe to do while a recording is in flight: renaming a
+    directory moves the inode, and already-open WAV handles keep writing into it.
+    The caller only has to repoint the paths it will use *later* — see
     recorder.RecordingEngine.relocate().
+
+    Windows does not work that way — it refuses to move a directory whose files
+    are open — so `move=False` renames only the display name and leaves the
+    folder alone. The caller repeats the rename with move=True once the handles
+    are closed; see AppCore._rename.
     """
     name = clean_name(name)
     if not name:
@@ -167,6 +193,9 @@ def rename_meeting(root: str, mid: str, name: str) -> str:
     src = folder(root, mid)
     if not os.path.isdir(src):
         raise FileNotFoundError(f"no such meeting: {mid}")
+    if not move:
+        update_meta(root, mid, name=name)
+        return mid
 
     m = _ID_STAMP.match(mid)
     stamp = m.group(1) if m else datetime.now().strftime("%Y-%m-%d_%H%M")

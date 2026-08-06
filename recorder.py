@@ -8,15 +8,19 @@ written to its own WAV via the stdlib `wave` module; on stop, multiple sources
 are mixed down to a single whisper-ready `audio.wav` with ffmpeg's amix.
 
 Two source kinds:
-  * "mic"     — a normal input device (your microphone)
-  * "system"  — a loopback device (e.g. BlackHole) that carries computer audio.
-                macOS can't capture system output without such a driver, so this
-                source is only available if a loopback device is present.
+  * "mic"     — a normal input device (your microphone), captured here
+  * "system"  — computer audio, captured by the platform backend in sysaudio.py
+                (ScreenCaptureKit on macOS, WASAPI loopback on Windows). No
+                loopback driver is involved on either platform.
+
+A microphone doesn't always give us the 16 kHz mono we want: CoreAudio will
+resample to anything, but WASAPI shared mode is pinned to whatever the endpoint
+is configured for. So a source that can't be opened at 16 kHz is opened at its
+own rate and converted on the way in (see dsp.py).
 """
 
 from __future__ import annotations
 
-import math
 import os
 import queue
 import shutil
@@ -25,16 +29,30 @@ import threading
 import wave
 
 import numpy as np
-import sounddevice as sd
+
+import dsp
+import osutil
+import toolpaths
+
+# Must run before sounddevice is imported: it resolves its PortAudio DLL at
+# import time, and on Windows-on-ARM it picks a name its own wheel doesn't ship.
+osutil.ensure_portaudio()
+
+import sounddevice as sd            # noqa: E402  (see above)
 
 SR = 16000
 BLOCK = 1024
-FFMPEG = shutil.which("ffmpeg") or "/opt/homebrew/bin/ffmpeg"
+FFMPEG = toolpaths.FFMPEG
 
-# input devices that are really loopbacks / aggregates carrying system audio
+# Input devices that are really loopbacks / aggregates carrying system audio.
+# They're excluded from microphone auto-selection: picking "Stereo Mix" as the
+# mic records the meeting's own output back into itself.
 _LOOPBACK_HINTS = ("blackhole", "loopback", "aggregate", "soundflower",
                    "vb-cable", "vb cable", "ishowu", "multi-output", "existential",
-                   "ladiocast", "groundcontrol")
+                   "ladiocast", "groundcontrol",
+                   # Windows
+                   "stereo mix", "what u hear", "wave out", "voicemeeter",
+                   "cable output", "virtual audio")
 
 
 # ---- device discovery --------------------------------------------------------
@@ -80,12 +98,7 @@ def detect_loopback_index():
     return None
 
 
-def _rms_to_level(rms: float) -> float:
-    """Map an RMS amplitude to a 0..1 meter value on a dBFS scale (-60..0 dB)."""
-    if rms <= 1e-7:
-        return 0.0
-    db = 20.0 * math.log10(rms)
-    return max(0.0, min(1.0, (db + 60.0) / 60.0))
+_rms_to_level = dsp.rms_to_level
 
 
 # ---- one capture source ------------------------------------------------------
@@ -106,12 +119,18 @@ class Source:
         self._writer = None
         self._wav = None
         self._run = False
+        self._convert = None    # set when the device can't give us 16 kHz mono
+        self._stoplock = threading.Lock()
         self.error = None
 
     # audio-thread callback: keep it light — meter + hand frames to the writer
     def _callback(self, indata, n, t, status):
-        mono = indata[:, 0]
-        rms = float(np.sqrt(np.mean(mono * mono))) if len(mono) else 0.0
+        # the None case is the common one (a device opened at 16 kHz mono) and
+        # costs nothing; otherwise this downmixes and resamples in place
+        mono = self._convert(indata) if self._convert is not None else indata[:, 0]
+        if not len(mono):
+            return          # the resampler is still accumulating a whole output
+        rms = float(np.sqrt(np.mean(mono * mono)))
         lvl = _rms_to_level(rms)
         # fast attack, slow release — reads like a VU meter
         self.level = lvl if lvl > self.level else self.level * 0.82 + lvl * 0.18
@@ -148,6 +167,50 @@ class Source:
                 except Exception:
                     pass
 
+    def _open_stream(self):
+        """Open the device, preferring 16 kHz mono and falling back if refused.
+
+        PortAudio over CoreAudio converts to whatever you ask for, so on macOS
+        the first attempt always wins and nothing else here ever runs. WASAPI
+        shared mode does not: it hands over the endpoint's own format or fails,
+        and some endpoints won't do mono either. Each fallback records what it
+        actually got, so the callback knows what to convert from.
+        """
+        try:
+            info = sd.query_devices(self.device_index)
+        except Exception:
+            info = {}
+        dev_sr = int(info.get("default_samplerate") or 0) or 48000
+        dev_ch = max(1, int(info.get("max_input_channels") or 1))
+
+        attempts = [(SR, 1)]
+        if dev_sr != SR:
+            attempts.append((dev_sr, 1))
+        if dev_ch > 1:
+            attempts.append((dev_sr, dev_ch))
+
+        last = None
+        for rate, ch in attempts:
+            stream = None
+            try:
+                stream = sd.InputStream(
+                    device=self.device_index, samplerate=rate, channels=ch,
+                    dtype="float32", blocksize=BLOCK, callback=self._callback)
+                # build the converter before starting: the first callback can
+                # arrive the instant the stream does
+                self._convert = dsp.make_converter(rate, ch, SR)
+                stream.start()
+                return stream
+            except Exception as e:
+                last = e
+                self._convert = None
+                try:
+                    if stream is not None:
+                        stream.close()
+                except Exception:
+                    pass
+        raise last if last is not None else RuntimeError("could not open input device")
+
     def start(self):
         if self._write:
             self._wav = wave.open(self.wav_path, "wb")
@@ -157,10 +220,7 @@ class Source:
         self._run = True
         self._writer = threading.Thread(target=self._write_loop, daemon=True)
         self._writer.start()
-        self._stream = sd.InputStream(
-            device=self.device_index, samplerate=SR, channels=1,
-            dtype="float32", blocksize=BLOCK, callback=self._callback)
-        self._stream.start()
+        self._stream = self._open_stream()
 
     @property
     def active(self) -> bool:
@@ -170,12 +230,28 @@ class Source:
             return False
 
     def stop(self):
+        # Take the stream out of the object before closing it. Two threads can
+        # reach here at once — a recording being finalized on a worker while the
+        # window closing calls teardown — and closing an already-closed PortAudio
+        # stream is a native crash, not a catchable exception.
+        with self._stoplock:
+            stream, self._stream = self._stream, None
         try:
-            if self._stream is not None:
-                self._stream.stop()
-                self._stream.close()
+            if stream is not None:
+                stream.stop()
+                stream.close()
         except Exception as e:
             self.error = str(e)
+        # Drain the resampler's tail before the writer is told to finish, so the
+        # track is exactly as long as the capture was. Queued first: the writer
+        # exits as soon as it sees a stopped run flag and an empty queue.
+        if self._convert is not None:
+            try:
+                tail = self._convert.flush()
+                if len(tail):
+                    self._q.put_nowait(tail)
+            except Exception:
+                pass
         self._run = False
         if self._writer is not None:
             self._writer.join(timeout=3)
@@ -192,15 +268,15 @@ class RecordingEngine:
     def __init__(self, specs: list[dict], folder: str, write: bool = True):
         """specs: a list of sources, order preserved. Each is either
         {'kind':'mic','index':int} (a PortAudio device) or
-        {'kind':'system','sck':True} (computer audio via ScreenCaptureKit).
+        {'kind':'system','system':True} (computer audio via the platform backend).
         write=False is monitor mode: live levels only, nothing written to disk."""
         self.folder = folder
         self.sources = []
         for s in specs:
             wav = os.path.join(folder, f"src_{s['kind']}.wav")
-            if s.get("sck"):
+            if s.get("system") or s.get("sck"):     # 'sck' kept for older callers
                 import sysaudio
-                self.sources.append(sysaudio.SCKSystemAudioSource(wav, write=write))
+                self.sources.append(sysaudio.SystemAudioSource(wav, write=write))
             else:
                 self.sources.append(Source(s["kind"], s["index"], wav, write=write))
         self._started = False
@@ -317,7 +393,8 @@ class RecordingEngine:
         cmd += ["-filter_complex", f"amix=inputs={len(wavs)}:normalize=0:duration=longest",
                 "-ar", str(SR), "-ac", "1", final]
         try:
-            subprocess.run(cmd, check=True, capture_output=True)
+            subprocess.run(cmd, check=True, capture_output=True,
+                           **osutil.popen_kwargs(new_group=False))
         except (OSError, subprocess.CalledProcessError):
             shutil.copyfile(wavs[0], final)   # fall back to the first source
         return final
