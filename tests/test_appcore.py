@@ -42,6 +42,8 @@ class StubHost:
         self.confirm_result = False
         self.closed = False
         self.token = None
+        self.next_file = None            # what a file dialog would return
+        self.next_folder = None          # what a folder dialog would return
 
     def js(self, fn, *args):
         self.js_calls.append((fn, args))
@@ -64,11 +66,12 @@ class StubHost:
         # asynchronous by contract; answering inline is allowed (macOS does)
         callback(self.token)
 
-    def pick_media_file(self, exts):
-        return None
+    # callback-based by contract, so a host is free to run the dialog off-thread
+    def pick_media_file(self, exts, callback):
+        callback(self.next_file)
 
-    def pick_folder(self, prompt="Choose"):
-        return None
+    def pick_folder(self, prompt, callback):
+        callback(self.next_folder)
 
     def copy_text(self, text):
         self.copied = text
@@ -196,6 +199,43 @@ check("unknown action is a no-op", True)
 core.dispatch({"not-an-action": 1})
 check("malformed message is a no-op", True)
 
+# ---- changing the library folder, typed and browsed ------------------------------
+orig_lib = core.cfg["library"]
+
+typed = os.path.join(TMP, "typed-library")
+core.dispatch({"action": "setLibrary", "value": typed})
+check("a typed path is accepted", core.cfg["library"] == typed, core.cfg["library"])
+check("the folder is created", os.path.isdir(typed))
+check("it persists", config.load()["library"] == typed)
+
+browsed = os.path.join(TMP, "browsed-library")
+host.next_folder = browsed
+core.dispatch({"action": "pickLibrary"})
+check("browsing sets it too", core.cfg["library"] == browsed, core.cfg["library"])
+
+host.next_folder = None                       # user cancelled the dialog
+core.dispatch({"action": "pickLibrary"})
+check("cancelling leaves it alone", core.cfg["library"] == browsed)
+
+core.dispatch({"action": "setLibrary", "value": "~/  "})
+check("~ is expanded, whitespace trimmed",
+      core.cfg["library"] == os.path.abspath(os.path.expanduser("~")), core.cfg["library"])
+
+# a path that cannot be a directory must be refused, not saved and failed on later
+blocker = os.path.join(TMP, "iam-a-file")
+pathlib.Path(blocker).write_text("x")
+before = core.cfg["library"]
+n = len(host.toasts)
+core.dispatch({"action": "setLibrary", "value": blocker})
+check("an unusable path is refused", core.cfg["library"] == before, core.cfg["library"])
+check("and the user is told", any("Can't use that folder" in x for x in host.toasts[n:]),
+      host.toasts[-1])
+
+core.dispatch({"action": "setLibrary", "value": ""})
+check("an empty path is refused", core.cfg["library"] == before)
+
+core.cfg["library"] = lib; config.save(core.cfg)   # restore for later checks
+
 # ---- the setup notice ------------------------------------------------------------
 import pipeline                                  # noqa: E402
 check("init carries setup", "setup" in init and "ok" in init["setup"], init.get("setup"))
@@ -222,6 +262,7 @@ finally:
 # ...and goes quiet once everything is there. Faked rather than asserted about
 # the real machine: this suite has to pass on a box that hasn't been set up yet,
 # which is exactly the case the banner exists for.
+import deps                                   # noqa: E402
 fake_bin, fake_models = sys.executable, pathlib.Path(TMP) / "models"
 fake_models.mkdir(exist_ok=True)
 (fake_models / f"ggml-{core.cfg['model']}.bin").write_bytes(b"x")
@@ -229,13 +270,40 @@ fake_models.mkdir(exist_ok=True)
 saved = (pipeline.FFMPEG, pipeline.FFPROBE, pipeline.WHISPER_CLI, pipeline.MODELS_DIR)
 pipeline.FFMPEG = pipeline.FFPROBE = pipeline.WHISPER_CLI = fake_bin
 pipeline.MODELS_DIR = fake_models
+# model_complete() measures against the real download size, so a stub file is
+# (correctly) "incomplete" — drop the expected size for the duration so the stub
+# counts as whole. Writing 2.9 GB to prove a point is not on.
+saved_sizes = dict(deps.SIZES)
+deps.SIZES.pop(f"ggml-{core.cfg['model']}.bin", None)
+deps.SIZES.pop("ggml-silero-v6.2.0.bin", None)
 try:
     s = appcore.setup_summary(core.cfg)
     check("a complete install reports ok", s["ok"] is True, s["missing"])
     check("no audio-loss warning when ffmpeg is present", s["loses_audio"] is False)
 finally:
     pipeline.FFMPEG, pipeline.FFPROBE, pipeline.WHISPER_CLI, pipeline.MODELS_DIR = saved
+    deps.SIZES.clear(); deps.SIZES.update(saved_sizes)
 
+
+# ---- a truncated model must read as unusable, not as installed -------------------
+# This is what "whisper-cli failed" turned out to be: a 2 GB fragment of a 2.9 GB
+# model sitting under the final name, so nothing re-downloaded it and whisper
+# just failed to load it.
+trunc = fake_models / "ggml-trunc-test.bin"
+trunc.write_bytes(b"x" * 1000)
+deps.SIZES["ggml-trunc-test.bin"] = 10_000
+check("a truncated model is not 'complete'", deps.model_complete(trunc, "ggml-trunc-test.bin") is False)
+trunc.write_bytes(b"x" * 9_600)          # 96% — within the slack
+check("a whole model is 'complete'", deps.model_complete(trunc, "ggml-trunc-test.bin") is True)
+deps.SIZES.pop("ggml-trunc-test.bin")
+check("an unknown model falls back to non-empty", deps.model_complete(trunc, "who-knows.bin") is True)
+
+check("whisper's real error survives, not just our prefix",
+      "failed to load model" in appcore.error_summary(
+          "whisper-cli failed:\nwhisper_model_load: loading model\n"
+          "whisper_init_with_params_no_state: failed to load model\n"
+          "whisper_print_timings:     load time = 12.00 ms"),
+      appcore.error_summary("whisper-cli failed:\nx\nfailed to load model"))
 
 # ---- a failed meta write must not wedge the recorder ----------------------------
 # On Windows os.replace can hit a sharing violation (an indexer or AV holding

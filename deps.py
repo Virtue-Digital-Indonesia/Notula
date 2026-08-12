@@ -53,21 +53,44 @@ WHISPER_ASSET = "whisper-blas-bin-x64.zip"      # BLAS: faster than plain, no GP
 UA = {"User-Agent": "notula-setup"}
 CHUNK = 1 << 18
 
-# Roughly how big each download is, for a progress bar that can show a total
-# before any of it has started.
+# How big each download is. The model figures are the servers' exact
+# Content-Length, not estimates, because model_complete() compares against them
+# to decide whether a file on disk is whole — a rounded guess makes a complete
+# file look truncated (the VAD model is 885,098 bytes; against a round 1 MB it
+# reads as 84% and "incomplete"). The archive figures are approximate; they only
+# weight the progress bar.
 SIZES = {
-    "ffmpeg": 80 << 20,
-    "whisper": 20 << 20,
-    "ggml-large-v3.bin": 2952 << 20,
-    "ggml-large-v3-turbo.bin": 1549 << 20,
-    "ggml-small.bin": 465 << 20,
-    "ggml-silero-v6.2.0.bin": 1 << 20,
-    "brew": 120 << 20,
+    "ffmpeg": 106 << 20,                    # approximate
+    "whisper": 20 << 20,                    # approximate
+    "brew": 120 << 20,                      # approximate
+    "ggml-large-v3.bin": 3095033483,
+    "ggml-large-v3-turbo.bin": 1624555275,
+    "ggml-small.bin": 487601967,
+    "ggml-silero-v6.2.0.bin": 885098,
 }
 
 
 class Cancelled(Exception):
     pass
+
+
+def model_complete(path: Path, key: str | None = None) -> bool:
+    """Whether a model file is actually all there.
+
+    A truncated .bin is worse than an absent one. whisper-cli fails to load it
+    and exits non-zero, and every layer above reports that as "whisper-cli
+    failed" — so the user is told nothing about the real problem, and nothing
+    re-downloads it because the file exists.
+
+    Compared against the known download size with 10% slack, so a model upstream
+    has legitimately re-quantised smaller doesn't read as broken.
+    """
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return False
+    expected = SIZES.get(key or path.name)
+    return size >= expected * 0.9 if expected else size > 0
 
 
 # ---- download ----------------------------------------------------------------
@@ -116,6 +139,11 @@ def _download(url: str, dest: Path, on_bytes, cancel) -> None:
                 fh.write(buf)
                 done += len(buf)
                 on_bytes(done, total)
+    # Never publish a short file under the final name: that is precisely how a
+    # half-downloaded model becomes a permanent, silent failure.
+    if total and part.stat().st_size < total:
+        raise RuntimeError(
+            f"download ended early: got {part.stat().st_size:,} of {total:,} bytes")
     part.replace(dest)
 
 
@@ -196,7 +224,7 @@ def plan(cfg, live_models: bool = False) -> list[dict]:
     if live_models:
         wanted += ["ggml-large-v3-turbo.bin", "ggml-small.bin"]
     for name in wanted:
-        if not (models_dir / name).exists():
+        if not model_complete(models_dir / name, name):
             steps.append({"key": name, "label": f"model {name}", "kind": "download",
                           "bytes": SIZES.get(name, 1 << 30)})
     if pipeline.find_vad_model() is None:
@@ -298,8 +326,18 @@ def install(steps: list[dict], on_progress, cancel) -> dict:
                 zp.unlink(missing_ok=True)
 
             else:                                    # a model
+                dest = models_dir / key
+                if dest.exists() and not model_complete(dest, key):
+                    # A truncated file is a valid prefix of the real one, so hand
+                    # it back to the resumer rather than throwing away gigabytes.
+                    part = dest.with_suffix(dest.suffix + ".part")
+                    try:
+                        part.unlink(missing_ok=True)
+                        dest.replace(part)
+                    except OSError:
+                        pass
                 url = VAD_URL if key.startswith("ggml-silero") else f"{MODEL_BASE}/{key}"
-                _download(url, models_dir / key, bytes_cb(label), cancel)
+                _download(url, dest, bytes_cb(label), cancel)
 
             finished_weight += cur_weight
             cur_weight = 0

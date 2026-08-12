@@ -65,6 +65,16 @@ $FFMPEG_URL = 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip'
 
 $script:Problems = @()
 
+# Real download sizes, so a half-finished file is recognised as half-finished
+# rather than treated as installed. 0 means "unknown, accept whatever is there".
+$EXPECTED = @{
+    'large-v3'       = 3095033483
+    'large-v3-turbo' = 1624555275
+    'small'          =  487601967
+    'medium'         =          0
+    'base'           =          0
+}
+
 # ---- output helpers ----------------------------------------------------------
 
 function Step($m) { Write-Host "`n==> $m" -ForegroundColor Cyan }
@@ -213,14 +223,19 @@ function Install-Whisper {
 
 # ---- models ------------------------------------------------------------------
 
-function Install-Model([string] $File, [string] $Url, [string] $Size, [bool] $Required) {
+function Install-Model([string] $File, [string] $Url, [string] $Size, [bool] $Required,
+                       [long] $Expected = 0) {
     $dest = Join-Path $ModelsDir $File
     if ((Test-Path $dest) -and -not $Force) {
-        $mb = (Get-Item $dest).Length
-        # a truncated download from an earlier interrupted run is worse than none:
-        # whisper fails with an opaque error rather than saying "incomplete"
-        if ($mb -gt 100KB) { Skip "$File already present ($(HumanMB $mb))"; return }
-        Note "$File looks truncated ($(HumanMB $mb)) - refetching"
+        $have = (Get-Item $dest).Length
+        # Size-checked, not just "exists". A run interrupted partway leaves a
+        # multi-gigabyte fragment under the final name; a >100KB test passes it
+        # every time, so the file is never repaired and whisper-cli just fails to
+        # load it forever. $Expected is the real download size.
+        if ($Expected -gt 0 -and $have -lt ($Expected * 0.9)) {
+            Note "$File is incomplete ($(HumanMB $have) of $(HumanMB $Expected)) - resuming"
+        }
+        else { Skip "$File already present ($(HumanMB $have))"; return }
     }
     try {
         Get-File -Url $Url -Dest $dest -Label "$File ($Size)"
@@ -233,11 +248,11 @@ function Install-Model([string] $File, [string] $Url, [string] $Size, [bool] $Re
 
 function Install-Models {
     Step 'models'
-    Install-Model "ggml-$Model.bin" "$MODEL_BASE/ggml-$Model.bin" '2.9 GB for large-v3' $true
-    Install-Model 'ggml-silero-v6.2.0.bin' $VAD_URL '1 MB' $true
+    Install-Model "ggml-$Model.bin" "$MODEL_BASE/ggml-$Model.bin" '2.9 GB for large-v3' $true $EXPECTED[$Model]
+    Install-Model 'ggml-silero-v6.2.0.bin' $VAD_URL '1 MB' $true 885098
     if ($LiveModels) {
-        Install-Model 'ggml-large-v3-turbo.bin' "$MODEL_BASE/ggml-large-v3-turbo.bin" '1.5 GB' $false
-        Install-Model 'ggml-small.bin' "$MODEL_BASE/ggml-small.bin" '465 MB' $false
+        Install-Model 'ggml-large-v3-turbo.bin' "$MODEL_BASE/ggml-large-v3-turbo.bin" '1.5 GB' $false $EXPECTED['large-v3-turbo']
+        Install-Model 'ggml-small.bin' "$MODEL_BASE/ggml-small.bin" '465 MB' $false $EXPECTED['small']
     }
     else {
         Skip 'live-transcript models (pass -LiveModels to fetch them)'

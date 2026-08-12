@@ -68,6 +68,8 @@ a{color:var(--link);}
 .footbar .btn{flex:1; width:auto; min-height:40px; text-align:center; padding-left:16px; padding-right:16px;}
 .footbar .btn.btn-tertiary{background:var(--layer2); border-color:transparent; color:var(--link);}
 .footbar .btn.btn-tertiary:hover{background:var(--border-strong); color:var(--link);}
+.verline{font-size:11px; color:var(--text-help); text-align:right;
+  padding:8px 2px 2px; letter-spacing:.16px; user-select:text;}
 
 /* ── card ── */
 .card{background:var(--layer); padding:14px 16px; margin-top:12px;}
@@ -447,8 +449,16 @@ a{color:var(--link);}
       </div>
       <div class="f full">
         <label>Library folder</label>
-        <div class="inp"><input id="library" disabled><span class="unit" style="cursor:pointer;color:var(--link);padding-right:12px;" onclick="post('pickLibrary')">Change</span></div>
-        <span class="help">Where meeting folders are saved. Transcription model: large-v3.</span>
+        <!-- typeable as well as browsable: a folder dialog is one more thing
+             that can fail or open behind the window, and a path you can paste
+             always works (a network share, another drive) -->
+        <div class="inp"><input id="library" spellcheck="false"
+             placeholder="Documents/Notula"
+             onchange="post('setLibrary',{value:this.value})"><span class="unit"
+             style="cursor:pointer;color:var(--link);padding-right:12px;"
+             onclick="post('pickLibrary')">Browse…</span></div>
+        <span class="help">Where new meeting folders are saved — type a path or browse.
+          Changing it leaves existing meetings where they are.</span>
       </div>
     </div>
   </section>
@@ -456,9 +466,12 @@ a{color:var(--link);}
   <div class="footbar">
     <button class="btn btn-secondary" onclick="post('refresh')">Refresh</button>
     <button class="btn btn-secondary" onclick="post('openLibrary')">Open library</button>
-    <div class="sub" id="verline" style="margin:10px 0 0; text-align:right;"></div>
     <button class="btn btn-tertiary"  onclick="post('quit')">Quit</button>
   </div>
+
+  <!-- build, bottom-right and out of the way; a beta report is unusable without
+       it, but it isn't a control and doesn't belong in the button bar -->
+  <div id="verline" class="verline"></div>
 
 </div>
 
@@ -587,8 +600,14 @@ function renderSetup(s){
   $('sb_title').textContent = s.loses_audio
     ? 'ffmpeg is missing — recordings will lose a track'
     : 'Setup incomplete — transcription is unavailable';
-  var names = (s.missing||[]).map(function(m){ return m.label; }).join(', ');
-  var parts = ['Missing: ' + names + '.'];
+  /* "half-downloaded" and "absent" need different words — the first means wait,
+     the second means fetch */
+  var names = (s.missing||[]).map(function(m){
+    return m.label + (m.note ? ' (' + m.note + ')' : '');
+  }).join(', ');
+  var parts = [(s.missing||[]).some(function(m){ return m.note; })
+    ? 'Not usable yet: ' + names + '.'
+    : 'Missing: ' + names + '.'];
   parts.push(s.loses_audio
     ? 'You can still record, but a meeting that captures your microphone and computer audio together cannot be mixed — only the microphone would be kept.'
     : 'Recording works; transcribing does not.');

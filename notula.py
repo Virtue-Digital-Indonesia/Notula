@@ -172,24 +172,29 @@ class Bridge(NSObject):
                 continue
             return None                           # Skip
 
+    # Both answer via callback (see appcore.Host). Running the panel inline is
+    # safe here — NSOpenPanel.runModal keeps the run loop pumping, so the app
+    # stays alive — and the callback fires before returning.
+
     @objc.python_method
-    def pick_media_file(self, exts):
+    def pick_media_file(self, exts, callback):
         panel = NSOpenPanel.openPanel()
         panel.setCanChooseFiles_(True)
         panel.setCanChooseDirectories_(False)
         panel.setAllowsMultipleSelection_(False)
         panel.setTitle_("Import a recording to transcribe")
         panel.setAllowedFileTypes_(list(exts))
-        return panel.URLs()[0].path() if panel.runModal() == 1 else None
+        callback(panel.URLs()[0].path() if panel.runModal() == 1 else None)
 
     @objc.python_method
-    def pick_folder(self, prompt="Choose"):
+    def pick_folder(self, prompt, callback):
         panel = NSOpenPanel.openPanel()
         panel.setCanChooseFiles_(False)
         panel.setCanChooseDirectories_(True)
+        panel.setCanCreateDirectories_(True)
         panel.setAllowsMultipleSelection_(False)
         panel.setPrompt_(prompt)
-        return panel.URLs()[0].path() if panel.runModal() == 1 else None
+        callback(panel.URLs()[0].path() if panel.runModal() == 1 else None)
 
     @objc.python_method
     def copy_text(self, text):

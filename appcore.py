@@ -21,6 +21,7 @@ Threading contract, unchanged from the original AppKit version:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import sys
@@ -76,8 +77,11 @@ class Host:
     prompt_hf_token(cb)      ask for the token, then call cb(token_or_None) on
                              the UI thread. MUST NOT block the caller: it fires
                              unprompted at startup. Copy: HF_PROMPT_TITLE/BODY.
-    pick_media_file(exts)    open dialog; a path, or None if cancelled.
-    pick_folder(prompt)      folder dialog; a path, or None if cancelled.
+    pick_media_file(exts,cb) open dialog, then cb(path_or_None) on the UI thread.
+    pick_folder(prompt,cb)   folder dialog, then cb(path_or_None) on the UI thread.
+                             Both MUST NOT block the caller, for the same reason
+                             as prompt_hf_token: a modal that opens behind the
+                             main window would otherwise freeze everything.
     copy_text(text)          put text on the system clipboard.
     close()                  close the window / quit the app.
     """
@@ -123,6 +127,43 @@ def fmt_elapsed(sec) -> str:
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
+log = logging.getLogger("notula")
+
+
+def error_summary(err: str) -> str:
+    """One useful line out of a subprocess failure.
+
+    pipeline raises "whisper-cli failed:\\n<20 lines of its output>", so taking
+    the first line — as this used to — reports the literal string "whisper-cli
+    failed:" and discards everything that says why. whisper puts its actual
+    complaint at the end, so pair our prefix with the last real line.
+    """
+    lines = [l.strip() for l in (err or "").splitlines() if l.strip()]
+    if not lines:
+        return "failed"
+    if len(lines) == 1:
+        return lines[0]
+    head = lines[0].rstrip(":")
+    # skip whisper's timing summary, which is noise rather than a cause
+    for line in reversed(lines[1:]):
+        if not line.startswith(("whisper_print_timings", "main:", "system_info")):
+            return f"{head} — {line}"[:300]
+    return head
+
+
+def _incomplete_note(path, key) -> str:
+    """'half-downloaded' reads very differently from 'missing', and it's the
+    difference between the user waiting and the user re-downloading."""
+    try:
+        have = path.stat().st_size
+    except OSError:
+        return ""
+    want = deps.SIZES.get(key)
+    if not want or have >= want * 0.9:
+        return ""
+    return f"incomplete — {have / (1 << 20):,.0f} of about {want / (1 << 20):,.0f} MB"
+
+
 def tool_status(cfg) -> list[dict]:
     """Every external dependency, where we looked, and whether it's there.
 
@@ -144,8 +185,13 @@ def tool_status(cfg) -> list[dict]:
         {"key": "whisper-cli", "label": "whisper-cli", "path": str(pipeline.WHISPER_CLI),
          "ok": os.path.exists(pipeline.WHISPER_CLI), "required": True,
          "for": "transcribing"},
+        # complete, not merely present: a truncated .bin makes whisper-cli exit
+        # non-zero with nothing useful to say, and never gets re-downloaded
+        # because the file is there
         {"key": "model", "label": f"model ggml-{cfg['model']}.bin", "path": str(model_file),
-         "ok": model_file.exists(), "required": True, "for": "transcribing"},
+         "ok": deps.model_complete(model_file, f"ggml-{cfg['model']}.bin"),
+         "note": _incomplete_note(model_file, f"ggml-{cfg['model']}.bin"),
+         "required": True, "for": "transcribing"},
         {"key": "vad", "label": "VAD model",
          "path": str(vad or (pipeline.MODELS_DIR / pipeline.VAD_MODEL)),
          "ok": vad is not None, "required": True, "for": "transcribing"},
@@ -176,8 +222,10 @@ def setup_summary(cfg) -> dict:
     steps = deps.plan(cfg)
     return {
         "ok": not missing,
-        "missing": [{"label": t["label"], "for": t["for"]} for t in missing],
-        "optional": [{"label": t["label"], "for": t["for"]} for t in optional],
+        "missing": [{"label": t["label"], "for": t["for"], "note": t.get("note", "")}
+                    for t in missing],
+        "optional": [{"label": t["label"], "for": t["for"], "note": t.get("note", "")}
+                     for t in optional],
         "hint": setup_hint(),
         # what the in-app installer would fetch, so the button can say how big
         # this is before the user commits to it
@@ -614,6 +662,8 @@ class AppCore:
             self._cancel_deps()
         elif action == "pickLibrary":
             self._pick_library()
+        elif action == "setLibrary":
+            self._set_library(str(body.get("value") or ""))
         elif action == "openLibrary":
             self._open_path(self.cfg["library"])
         elif action == "refresh":
@@ -985,7 +1035,10 @@ class AppCore:
     # ---- import a pre-recorded file ----
 
     def _import_dialog(self):
-        path = self.host.pick_media_file(MEDIA_EXTS)
+        # asynchronous for the same reason as pick_folder — see _pick_library
+        self.host.pick_media_file(MEDIA_EXTS, self._import_picked)
+
+    def _import_picked(self, path):             # UI thread
         if path:
             self._import_path(path)
 
@@ -1132,9 +1185,13 @@ class AppCore:
                 self._toast(f"Transcribed (plain — {why})", "warn")
 
     def _tx_failed(self, mid, err):
+        summary = error_summary(err)
+        # The full text is the only thing that says *why* — whisper prints its
+        # real complaint on the last line, and the first is our own prefix.
+        log.error("transcription failed for %s:\n%s", mid, err)
         try:
             library.update_meta(self.cfg["library"], mid, status=library.ERROR,
-                                warning=err.splitlines()[0] if err else "failed")
+                                warning=summary)
         except OSError:           # see _on_stopped: never leave tx_mid stuck
             pass
         finally:
@@ -1143,7 +1200,7 @@ class AppCore:
             self._tx_proc = None
         self._push_state()
         self._push_meetings()
-        self._toast(f"Transcription failed: {err.splitlines()[0] if err else ''}", "err")
+        self._toast(f"Transcription failed: {summary}", "err")
 
     # ---- meeting actions ----
 
@@ -1316,15 +1373,50 @@ class AppCore:
                     "ok" if value else "info")
 
     def _pick_library(self):
-        path = self.host.pick_folder("Use folder")
+        """Browse for a library folder.
+
+        Asynchronous, like every other dialog: the host puts a modal on screen,
+        and blocking the dispatch thread behind one that may have opened *behind*
+        the main window is how the whole UI freezes with no visible cause.
+        """
+        self.host.pick_folder("Use folder", self._library_picked)
+
+    def _library_picked(self, path):            # UI thread
+        if path:
+            self._set_library(path)
+
+    def _set_library(self, path):
+        """Point the library at `path`, typed or browsed.
+
+        Verified before it's committed: a path that can't be created or written
+        to would otherwise be saved and then fail at the worst possible moment —
+        when a recording tries to land in it.
+        """
+        path = os.path.expanduser((path or "").strip())
         if not path:
+            self._toast("A library folder needs a path", "warn")
+            self._push_init()
+            return
+        path = os.path.abspath(path)
+        if os.path.normcase(path) == os.path.normcase(self.cfg["library"]):
+            self._push_init()                   # no change; just resync the field
+            return
+        try:
+            library.ensure_root(path)
+            probe = os.path.join(path, ".notula-write-test")
+            with open(probe, "w", encoding="utf-8") as fh:
+                fh.write("")
+            os.unlink(probe)
+        except OSError as e:
+            self._toast(f"Can't use that folder: {e}", "err")
+            self._push_init()                   # snap the field back to reality
             return
         self.cfg["library"] = path
         config.save(self.cfg)
-        library.ensure_root(path)
         self._push_init()
         self._push_meetings()
-        self._toast("Library folder set", "ok")
+        self._toast(f"Library folder is now {path} — existing meetings stay where "
+                    f"they are", "ok")
 
     # ---- installing the external tools, from inside the app ----
 

@@ -408,20 +408,43 @@ class WinHost:
     # pywebview returns None for both, so a fallback keyed on None would pop a
     # second dialog every time the user pressed Cancel.
 
-    def pick_media_file(self, exts):
-        from tkinter import filedialog
-        with _Tk() as root:
-            _to_front(root)
-            return filedialog.askopenfilename(
-                parent=root, title="Import a recording to transcribe",
-                filetypes=[("Audio and video", " ".join(f"*.{e}" for e in exts)),
-                           ("All files", "*.*")]) or None
+    def _dialog_async(self, fn, callback):
+        """Run a modal on a thread of its own and report the answer back.
 
-    def pick_folder(self, prompt="Choose"):
-        from tkinter import filedialog
-        with _Tk() as root:
-            _to_front(root)
-            return filedialog.askdirectory(parent=root, title=prompt) or None
+        Never on the dispatch thread. A Tk dialog can open behind the WebView2
+        window, and a modal the user cannot see, blocking the thread that handles
+        every message, is indistinguishable from a hung app — the exact failure
+        the startup token prompt used to cause.
+        """
+        def worker():
+            result = None
+            try:
+                result = fn()
+            except Exception:
+                log.exception("dialog failed")
+            self.on_main(callback, result)
+
+        threading.Thread(target=worker, name="notula-dialog", daemon=True).start()
+
+    def pick_media_file(self, exts, callback):
+        def dialog():
+            from tkinter import filedialog
+            with _Tk() as root:
+                _to_front(root)
+                return filedialog.askopenfilename(
+                    parent=root, title="Import a recording to transcribe",
+                    filetypes=[("Audio and video", " ".join(f"*.{e}" for e in exts)),
+                               ("All files", "*.*")]) or None
+        self._dialog_async(dialog, callback)
+
+    def pick_folder(self, prompt, callback):
+        def dialog():
+            from tkinter import filedialog
+            with _Tk() as root:
+                _to_front(root)
+                return filedialog.askdirectory(
+                    parent=root, title=prompt, mustexist=False) or None
+        self._dialog_async(dialog, callback)
 
     def copy_text(self, text):
         if not set_clipboard(text):
