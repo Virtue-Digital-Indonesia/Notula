@@ -38,7 +38,7 @@ OPTIONS = {
         "AVFoundation", "ScreenCaptureKit", "libdispatch", "Quartz",
         "PyObjCTools", "PyObjCTools.AppHelper",
         # our own modules (all reachable from notula.py, but be explicit)
-        "appcore", "config", "library", "recorder", "pipeline", "live",
+        "appcore", "config", "library", "recorder", "pipeline", "cloud", "live",
         "dsp", "osutil", "toolpaths", "appicon", "deps", "version",
         "permissions", "permissions_mac", "sysaudio", "sysaudio_mac",
     ],

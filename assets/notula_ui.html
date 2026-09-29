@@ -215,6 +215,32 @@ a{color:var(--link);}
 .srchint a{cursor:pointer;}
 
 /* ── meetings list ── */
+/* ── meetings: collapse + filter toolbar ── */
+.collapser{display:flex; align-items:center; gap:8px; background:none; border:0;
+  padding:0; margin:0; cursor:pointer; color:inherit; font:inherit; text-align:left;}
+.collapser:focus-visible{outline:2px solid var(--focus); outline-offset:3px;}
+.collapser .chev{width:0; height:0; flex:0 0 auto;
+  border-left:5px solid transparent; border-right:5px solid transparent;
+  border-top:6px solid var(--text-2); transition:transform .12s ease;}
+.collapser[aria-expanded="false"] .chev{transform:rotate(-90deg);}
+.collapser:hover .chev{border-top-color:var(--text);}
+
+.mtools{display:flex; gap:8px; margin:0 0 8px; flex-wrap:wrap;}
+.mtools .mtool-q{flex:1 1 200px; min-width:0;}
+.mtools input, .mtools select{font-family:inherit; font-size:12.5px; height:32px;
+  padding:0 10px; color:var(--text); background:var(--field);
+  border:0; border-bottom:1px solid var(--border-strong); -webkit-appearance:none;
+  appearance:none;}
+.mtools select{padding-right:26px; cursor:pointer;
+  background-image:linear-gradient(45deg,transparent 50%,var(--text-2) 50%),
+                   linear-gradient(135deg,var(--text-2) 50%,transparent 50%);
+  background-position:calc(100% - 15px) 14px, calc(100% - 10px) 14px;
+  background-size:5px 5px, 5px 5px; background-repeat:no-repeat;}
+.mtools input:focus, .mtools select:focus{outline:2px solid var(--focus); outline-offset:-2px;}
+.mtools input::placeholder{color:var(--text-place);}
+.meet-note{font-size:11.5px; color:var(--text-help); padding:8px 2px 0;}
+.meet-note a{cursor:pointer; text-decoration:underline;}
+
 .mlist{display:flex; flex-direction:column; gap:1px; background:var(--border-sub); margin-top:2px;}
 .mrow{display:flex; align-items:center; gap:12px; background:var(--layer); padding:11px 4px;}
 .minfo{flex:1; min-width:0;}
@@ -266,10 +292,36 @@ a{color:var(--link);}
 .recnote{font-size:11px; color:var(--text-help); letter-spacing:.2px; line-height:1.45;}
 .recnote b{color:var(--text-2); font-weight:600;}
 
+/* engine picker: two big radio cards, one per way of transcribing */
+.engines{display:flex; flex-direction:column; gap:6px;}
+.f label.engine{display:flex; gap:10px; align-items:flex-start; background:var(--layer2); padding:8px 12px; cursor:pointer; border:1px solid transparent;
+  text-transform:none; letter-spacing:0; margin:0; font-size:13px;}
+.engine.on{border-color:var(--primary);}
+.engine.off{opacity:.55; cursor:not-allowed;}
+/* .f input sizes text fields (height, flex:1); a radio must not inherit that */
+.f label.engine input[type=radio]{flex:0 0 auto; width:15px; height:15px; min-height:0; padding:0; margin:2px 0 0; accent-color:var(--primary);}
+.engine .et{font-size:13px; color:var(--text); text-transform:none; letter-spacing:0;}
+.engine .ed{font-size:10.5px; color:var(--text-help); letter-spacing:.2px; line-height:1.4; margin-top:1px; text-transform:none;}
+/* a toggle inside a field: not a field label (no uppercase), and its hidden
+   checkbox must not pick up the text-field sizing of .f input */
+.f label.toggle{text-transform:none; letter-spacing:0; font-size:13px; margin:2px 0 0;}
+.f .toggle input{position:absolute; opacity:0; width:0; height:0; flex:none; padding:0;}
+.toggle.off{cursor:not-allowed; opacity:.5;}
+.estimate{margin:8px 16px 0; padding:9px 12px; background:var(--layer2); font-size:12px; line-height:1.5; color:var(--text-2);}
+.estimate b{color:var(--text); font-weight:600; font-size:14px;}
+.estimate .small{font-size:10.5px; color:var(--text-help); letter-spacing:.2px; display:block; margin-top:3px;}
+
 /* modal (transcribe dialog) */
 .modal{display:none; position:fixed; inset:0; background:rgba(0,0,0,.55); z-index:200; align-items:flex-start; justify-content:center;}
 .modal.show{display:flex;}
-.modalbox{background:var(--layer); width:440px; max-width:calc(100vw - 32px); margin-top:60px; box-shadow:0 24px 70px rgba(0,0,0,.55);}
+/* never taller than the window: the box scrolls, and the buttons stay pinned
+   to its bottom edge so Start is reachable at any size */
+.modalbox{background:var(--layer); width:440px; max-width:calc(100vw - 32px); margin-top:24px;
+  max-height:calc(100vh - 48px); display:flex; flex-direction:column; box-shadow:0 24px 70px rgba(0,0,0,.55);}
+.modalbody{overflow-y:auto; flex:1 1 auto; min-height:0;}
+.modalbtns{flex:0 0 auto;}
+/* .f is display:flex, which beats the browser's own [hidden] rule */
+.f[hidden]{display:none;}
 .modalhead{display:flex; align-items:center; justify-content:space-between; padding:14px 16px 4px;}
 .modalhead h2{font-size:15px; font-weight:600; margin:0; letter-spacing:0;}
 .modalsub{padding:0 16px 4px; font-size:12.5px; color:var(--text-help);}
@@ -428,14 +480,40 @@ a{color:var(--link);}
   <!-- ── MEETINGS ── -->
   <section class="card">
     <div class="chead">
-      <h2>Meetings</h2>
+      <button class="collapser" id="meet_toggle" onclick="toggleMeetings()"
+              aria-expanded="true" aria-controls="meet_body">
+        <span class="chev" aria-hidden="true"></span><h2>Meetings</h2>
+      </button>
       <div style="display:flex; align-items:center; gap:10px;">
         <button class="btn btn-tertiary small wauto" onclick="post('importAudio')">Import audio…</button>
         <span id="meet_count" class="tag">0</span>
       </div>
     </div>
     <div class="sub">Record a meeting, or <b>drag an audio/video file onto the window or the Dock icon</b> (mov, mp4, m4a, mp3, …) — it's converted to audio and added here, ready to transcribe. Double-click a name (or hit <b>✎</b>) to rename a session and its folder.</div>
-    <div id="mlist" class="mlist"></div>
+    <div id="meet_body">
+      <div class="mtools">
+        <input id="meet_q" class="mtool-q" type="search" spellcheck="false"
+               placeholder="Search meetings…" oninput="applyMeetFilter()"
+               aria-label="Search meetings">
+        <select id="meet_days" onchange="applyMeetFilter()" aria-label="Filter by date">
+          <option value="0">Any date</option>
+          <option value="1">Today</option>
+          <option value="7">Last 7 days</option>
+          <option value="30">Last 30 days</option>
+          <option value="90">Last 90 days</option>
+        </select>
+        <select id="meet_limit" onchange="onMeetLimit()" aria-label="How many to show">
+          <option value="10">Show 10</option>
+          <option value="25">Show 25</option>
+          <option value="50">Show 50</option>
+          <option value="100">Show 100</option>
+          <option value="0">Show all</option>
+        </select>
+      </div>
+      <div id="mlist" class="mlist"></div>
+      <div id="meet_empty" class="mempty" hidden></div>
+      <div id="meet_more" class="meet-note" hidden></div>
+    </div>
   </section>
 
   <!-- ── APP SETTINGS (hidden; toggled by the ⚙ gear) ── -->
@@ -446,6 +524,24 @@ a{color:var(--link);}
         <label>HuggingFace token <span id="hf_tag" class="tag" style="margin-left:6px;">—</span></label>
         <div class="inp"><input id="hf_token" type="password" placeholder="hf_… (for speaker diarization)" onchange="post('setToken',{value:this.value})"></div>
         <span class="help">Stored privately in your config. Without it, transcripts have no speaker labels.</span>
+      </div>
+      <div class="f full">
+        <label>Transcription engine</label>
+        <select id="engine" onchange="onEngine(this.value)" aria-label="Transcription engine">
+          <option value="local">On this computer — whisper large-v3 + pyannote (free, nothing leaves the machine)</option>
+          <option value="cloud">OpenAI cloud — the audio is uploaded to OpenAI and billed per minute</option>
+        </select>
+        <span class="help" id="engine_help">The default for every transcription, including the automatic one when a recording stops. You can still pick the other engine in the Transcribe dialog.</span>
+      </div>
+      <div class="f full" id="cloud_model_row">
+        <label>OpenAI model</label>
+        <select id="cloud_model" onchange="onCloudModel(this.value)" aria-label="OpenAI transcription model"></select>
+        <span class="help" id="cloud_model_note"></span>
+      </div>
+      <div class="f full">
+        <label>OpenAI API key <span id="oa_tag" class="tag" style="margin-left:6px;">—</span></label>
+        <div class="inp"><input id="openai_key" type="password" placeholder="sk-… (for the cloud engine)" onchange="post('setOpenAIKey',{value:this.value})"></div>
+        <span class="help" id="oa_help">Stored privately in your config, like the HuggingFace token; $OPENAI_API_KEY is used if set. Create one at platform.openai.com/api-keys. Usage is billed to that account.</span>
       </div>
       <div class="f full">
         <label>Library folder</label>
@@ -480,25 +576,58 @@ a{color:var(--link);}
   <div class="modalbox">
     <div class="modalhead"><h2>Transcribe</h2><button class="iconbtn" onclick="closeTranscribe()">✕</button></div>
     <div class="modalsub" id="tx_name">meeting</div>
+    <div class="modalbody">
     <div class="fields">
+      <div class="f full">
+        <label>Engine</label>
+        <div class="engines" id="tx_engines">
+          <label class="engine" id="eng_local">
+            <input type="radio" name="tx_engine" value="local" onchange="onTxEngine('local')">
+            <div><div class="et">On this computer</div>
+              <div class="ed" id="eng_local_d">whisper large-v3 + pyannote. Free, slower, nothing leaves the machine.</div></div>
+          </label>
+          <label class="engine" id="eng_cloud">
+            <input type="radio" name="tx_engine" value="cloud" onchange="onTxEngine('cloud')">
+            <div><div class="et">OpenAI cloud</div>
+              <div class="ed" id="eng_cloud_d">Uploads the audio to OpenAI. Fast, billed to your OpenAI account.</div></div>
+          </label>
+        </div>
+      </div>
+      <div class="f full" id="tx_cloud_row" hidden>
+        <label>OpenAI model</label>
+        <select id="tx_cloud_model" onchange="onTxCloudModel(this.value)" aria-label="OpenAI transcription model"></select>
+        <span class="help" id="tx_cloud_note"></span>
+      </div>
+      <!-- speed vs speaker consistency: only means something for a model that
+           labels speakers, so it greys out (with the reason) for the others -->
+      <div class="f full" id="tx_par_row" hidden>
+        <label>Speed</label>
+        <label class="toggle" id="tx_par_lab"><input id="tx_parallel" type="checkbox"
+          onchange="onTxParallel(this.checked)"><span class="track"></span><span
+          class="tlab">Send parts in parallel</span></label>
+        <span class="help" id="tx_par_note"></span>
+      </div>
       <div class="f full">
         <label>Language</label>
         <div class="inp"><input id="tx_lang" placeholder="id" maxlength="8"></div>
-        <span class="help">Whisper language code — id, en, …</span>
+        <span class="help">Language code — id, en, …</span>
       </div>
-      <div class="f">
+      <div class="f" id="tx_min_row">
         <label>Min speakers</label>
         <div class="inp"><input id="tx_min" class="mono" inputmode="numeric"><span class="unit">0 = auto</span></div>
       </div>
-      <div class="f">
+      <div class="f" id="tx_max_row">
         <label>Max speakers</label>
         <div class="inp"><input id="tx_max" class="mono" inputmode="numeric"><span class="unit">0 = auto</span></div>
       </div>
     </div>
+    <!-- the price, before anything is sent: shown only for the cloud engine -->
+    <div class="estimate" id="tx_est" hidden></div>
     <div class="modalnote" id="tx_note"></div>
+    </div>
     <div class="modalbtns">
       <button class="btn btn-secondary" onclick="closeTranscribe()">Cancel</button>
-      <button class="btn btn-primary" onclick="startTranscribe()">Start transcription</button>
+      <button class="btn btn-primary" id="tx_start" onclick="startTranscribe()">Start transcription</button>
     </div>
   </div>
 </div>
@@ -544,6 +673,72 @@ var WAS_REC = false;
 var PAUSED = false;
 var LIVE = {lines:[], pending:'', total:0};
 var LIVE_MODELS = [];
+/* the cloud engine as Python reports it: models with their per-minute price,
+   and whether a key + ffmpeg are in place. Filled by notulaInit. */
+var CLOUD = {models:[], ok:false, key_ok:false, ffmpeg_ok:false, prices_checked:'', keys_url:'',
+             chunk_s:300, concurrency:4};
+
+/* ── pricing a cloud transcription ──
+   Billed time is whole seconds (the API reports usage in seconds), so 59.2 s
+   is priced as 60. Kept as plain functions so tests can pull them out. */
+function estimateUsd(seconds, usdPerMin){
+  var s = Math.ceil(Math.max(0, Number(seconds)||0));
+  return s/60 * (Number(usdPerMin)||0);
+}
+function fmtUsd(usd){
+  if(!(usd>0)) return '$0.00';
+  if(usd<0.01) return 'less than $0.01';
+  return '$'+usd.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+function fmtClock(seconds){
+  var s=Math.round(Math.max(0, Number(seconds)||0)), m=Math.floor(s/60), h=Math.floor(m/60);
+  s%=60; m%=60;
+  var mm=(h?String(m).padStart(2,'0'):String(m)), ss=String(s).padStart(2,'0');
+  return h ? h+':'+mm+':'+ss : mm+':'+ss;
+}
+function cloudModel(key){
+  for(var i=0;i<CLOUD.models.length;i++){ if(CLOUD.models[i].key===key) return CLOUD.models[i]; }
+  return CLOUD.models[0]||null;
+}
+/* a per-minute rate as printed: $0.006, $0.0045 — no padding, no float tail */
+function fmtRate(usdPerMin){
+  return '$'+(Number(usdPerMin)||0).toFixed(4).replace(/0+$/,'').replace(/\.$/,'');
+}
+/* "~" when the rate is a typical figure rather than the billed one */
+function rateText(m){
+  return (m.rate_source==='billed' ? '' : '~')+fmtRate(m.usd_per_min)+'/min';
+}
+function modelLabel(m){
+  return m.label+'  ·  '+rateText(m)+(m.diarize?'  ·  speakers':'  ·  no speakers');
+}
+/* How much audio a run will actually send: an earlier, interrupted run left
+   its finished parts in the meeting folder, and they are reused — but only
+   for the same model, language and part length they were made with. */
+function pendingSeconds(seconds, resume, model, lang, chunkS){
+  var s = Math.max(0, Number(seconds)||0);
+  if(!resume || !(resume.done_s>0)) return s;
+  if(resume.model!==model || resume.lang!==String(lang||'').trim().toLowerCase()) return s;
+  if(Number(resume.chunk_s)!==Number(chunkS)) return s;
+  return Math.max(0, s - resume.done_s);
+}
+/* Roughly how long a run takes — mirrors cloud.eta_seconds: the first part
+   alone (to learn the voices), then the rest `conc` at a time. */
+function etaSeconds(seconds, speed, diarize, chunkS, conc){
+  var s = Math.max(0, Number(seconds)||0); if(!s) return 0;
+  chunkS = Number(chunkS)||300; conc = Math.max(1, Number(conc)||1);
+  var parts = Math.max(1, Math.ceil(s/chunkS));
+  var perPart = Math.min(s, chunkS)*(Number(speed)||0) + 5;
+  return diarize ? perPart*(1 + Math.ceil((parts-1)/conc)) : perPart*Math.ceil(parts/conc);
+}
+function rateNote(m){
+  if(m.rate_source==='learned')
+    return 'Rate from what your earlier cloud transcriptions actually cost.';
+  if(m.rate_source==='billed')
+    return 'Billed by audio length, so this is the exact price.';
+  return 'Typical rate measured on real meetings. OpenAI bills this model by the token, so a '
+       + 'talkative meeting costs more; its published '+fmtRate(m.published_usd_per_min)
+       + '/min undercounts. The exact cost is shown after the run.';
+}
 
 function syncMute(kind, muted){
   MUTED[kind] = !!muted;
@@ -702,7 +897,18 @@ window.notulaInit = function(c){
   if($('library')) $('library').value = s.library||'';
   if($('hf_token')){ $('hf_token').value=''; $('hf_token').placeholder = s.hf_ok ? '•••••••• saved — paste a new token to replace' : 'hf_… (for speaker diarization)'; }
   setTag($('hf_tag'), s.hf_ok?'set':'not set', s.hf_ok?'ok':'warn');
-  window.TXDEFAULTS = {lang: s.lang||'id', min: (s.min_speakers||0), max: (s.max_speakers||0), hf_ok: !!s.hf_ok};
+  window.TXDEFAULTS = {lang: s.lang||'id', min: (s.min_speakers||0), max: (s.max_speakers||0), hf_ok: !!s.hf_ok,
+                       engine: s.engine||'local', cloud_model: s.cloud_model||'',
+                       cloud_parallel: (s.cloud_parallel!==false)};
+
+  CLOUD = c.cloud || CLOUD;
+  var opts = (CLOUD.models||[]).map(function(m){ return {value:m.key, label:modelLabel(m)}; });
+  fillSelect('cloud_model', opts, s.cloud_model);
+  fillSelect('tx_cloud_model', opts, s.cloud_model);
+  if($('engine')) $('engine').value = s.engine||'local';
+  if($('openai_key')){ $('openai_key').value=''; $('openai_key').placeholder = s.openai_ok ? '•••••••• saved — paste a new key to replace' : 'sk-… (for the cloud engine)'; }
+  setTag($('oa_tag'), s.openai_ok?'set':'not set', s.openai_ok?'ok':'warn');
+  updateCloudNote();
 
   var inputs = c.inputs||[];
   fillSelect('mic_dev', inputs.map(function(d){ return {value:String(d.index), label:'['+d.index+'] '+d.name}; }), String(c.mic_selected));
@@ -712,6 +918,18 @@ window.notulaInit = function(c){
   window.SYS_TEXT = {desc: c.system_desc||'', permission: c.system_permission_hint||'',
                      unavailable: c.system_unavailable||''};
   renderSetup(c.setup);
+
+  /* restore how the meetings list was left. Search and date are intentionally
+     not restored — reopening to a filtered list would look like lost meetings. */
+  MVIEW.limit = (s.meetings_limit==null) ? 25 : s.meetings_limit;
+  var lim=$('meet_limit'); if(lim) lim.value = String(MVIEW.limit);
+  var mt=$('meet_toggle'), mb=$('meet_body');
+  if(mt && mb){
+    var collapsed = !!s.meetings_collapsed;
+    mt.setAttribute('aria-expanded', collapsed?'false':'true');
+    mb.hidden = collapsed;
+  }
+  renderMeetings();
   /* which build this is — a beta tester's report is unusable without it */
   var vl=$('verline');
   if(vl) vl.textContent = 'Notula ' + (c.version||'') + ' · ' + (c.platform||'');
@@ -748,6 +966,16 @@ function updateLiveNote(){
                     : '';
 }
 function onLiveModel(v){ updateLiveNote(); post('setLiveModel',{value:v}); }
+
+/* ── cloud engine settings ── */
+function updateCloudNote(){
+  var sel=$('cloud_model'), n=$('cloud_model_note');
+  if(!sel||!n) return;
+  var m = cloudModel(sel.value);
+  n.textContent = m ? (m.note+'. '+rateNote(m)) : '';
+}
+function onEngine(v){ updateCloudNote(); post('setEngine',{value:v}); }
+function onCloudModel(v){ updateCloudNote(); post('setCloudModel',{value:v}); }
 
 var LIVE_STICK = true;   /* keep pinned to the newest line unless you scroll up */
 (function(){
@@ -876,17 +1104,86 @@ window.notulaState = function(st){
   }
 };
 
+/* ── meetings: collapse, search, date filter, row cap ──
+   All client-side: the list is already in memory, so filtering is instant and
+   costs no round trip. Python keeps pushing the whole list; what's on screen is
+   purely a view of it. */
+var MVIEW = {limit:25, expanded:0};   /* expanded: extra rows revealed by "Show more" */
+
+function toggleMeetings(){
+  var b=$('meet_toggle'), body=$('meet_body');
+  var open = b.getAttribute('aria-expanded')!=='false';
+  b.setAttribute('aria-expanded', open?'false':'true');
+  body.hidden = open;
+  post('setMeetingsView', {collapsed: open});
+}
+function onMeetLimit(){
+  MVIEW.limit = parseInt($('meet_limit').value, 10) || 0;
+  MVIEW.expanded = 0;
+  post('setMeetingsView', {limit: MVIEW.limit});
+  renderMeetings();
+}
+function applyMeetFilter(){ MVIEW.expanded = 0; renderMeetings(); }
+function meetShowMore(){ MVIEW.expanded += (MVIEW.limit || 25); renderMeetings(); }
+
+function filteredMeetings(){
+  var q = ($('meet_q') ? $('meet_q').value : '').trim().toLowerCase();
+  var days = parseInt(($('meet_days')||{}).value || '0', 10) || 0;
+  /* midnight-relative, so "Today" means today rather than the last 24 hours */
+  var cut = 0;
+  if(days){
+    var d = new Date(); d.setHours(0,0,0,0);
+    cut = (d.getTime() / 1000) - (days - 1) * 86400;
+  }
+  return MEETINGS.filter(function(m){
+    if(q && (m.name||'').toLowerCase().indexOf(q) === -1) return false;
+    if(cut && (m.ts||0) < cut) return false;
+    return true;
+  });
+}
+
+function renderMeetings(){
+  var wrap=$('mlist'); if(!wrap) return;
+  var all = MEETINGS.length, shown = filteredMeetings();
+  var cap = MVIEW.limit ? MVIEW.limit + MVIEW.expanded : shown.length;
+  var rows = shown.slice(0, cap);
+
+  RENDERING = true;
+  try{
+    wrap.innerHTML='';
+    setTag($('meet_count'),
+           shown.length===all ? String(all) : (shown.length + ' / ' + all),
+           all ? 'info' : '');
+    rows.forEach(function(m){ wrap.appendChild(renderRow(m)); });
+
+    var empty=$('meet_empty');
+    if(empty){
+      var msg = !all ? 'No meetings yet — record one above.'
+                     : (!shown.length ? 'Nothing matches that search or date range.' : '');
+      empty.textContent = msg; empty.hidden = !msg;
+    }
+    var more=$('meet_more');
+    if(more){
+      var hidden = shown.length - rows.length;
+      more.hidden = hidden <= 0;
+      if(hidden > 0){
+        more.innerHTML = '';
+        more.appendChild(document.createTextNode(
+          'Showing ' + rows.length + ' of ' + shown.length + ' · '));
+        var a=document.createElement('a');
+        a.textContent = 'Show ' + Math.min(hidden, MVIEW.limit||hidden) + ' more';
+        a.onclick = meetShowMore;
+        more.appendChild(a);
+      }
+    }
+  } finally { RENDERING = false; }
+}
+
 window.notulaMeetings = function(list){
   MEETINGS = list||[];
   /* an edit only survives if its row is still there (a rename changes the id) */
   if(EDIT && !MEETINGS.some(function(m){ return m.id===EDIT.id; })) EDIT=null;
-  RENDERING = true;
-  try{
-    var wrap=$('mlist'); wrap.innerHTML='';
-    setTag($('meet_count'), String(MEETINGS.length), MEETINGS.length?'info':'');
-    if(!MEETINGS.length){ var e=document.createElement('div'); e.className='mempty'; e.textContent='No meetings yet — record one above.'; wrap.appendChild(e); }
-    else { MEETINGS.forEach(function(m){ wrap.appendChild(renderRow(m)); }); }
-  } finally { RENDERING = false; }
+  renderMeetings();
   if(FOCUS_NEXT){
     var el=FOCUS_NEXT; FOCUS_NEXT=null; el.focus();
     /* a push that lands mid-edit rebuilds the input — put the caret back where
@@ -953,6 +1250,20 @@ function renderRow(m){
   var tg=document.createElement('span'); tg.className='tag '+st[1]; tg.textContent=st[0]; meta.appendChild(tg);
   parts.forEach(function(p){ if(!p) return; var s=document.createElement('span'); s.className='dotsep'; s.textContent='·'; meta.appendChild(s); var v=document.createElement('span'); v.textContent=p; meta.appendChild(v); });
   if(m.diarized){ var s2=document.createElement('span'); s2.className='dotsep'; s2.textContent='·'; meta.appendChild(s2); var d=document.createElement('span'); d.textContent='speakers'; meta.appendChild(d); }
+  /* a cloud transcription says so, with what it cost — the local one is free
+     and says nothing */
+  if(m.status==='transcribed' && m.engine==='cloud'){
+    var s4=document.createElement('span'); s4.className='dotsep'; s4.textContent='·'; meta.appendChild(s4);
+    var cv=document.createElement('span'); cv.textContent='OpenAI'+(m.cost_usd!=null ? ' '+fmtUsd(m.cost_usd) : '');
+    cv.title=(m.model||'OpenAI')+(m.cost_usd!=null ? ' · billed '+fmtUsd(m.cost_usd) : ''); meta.appendChild(cv);
+  }
+  /* an interrupted cloud run: say how much is already paid for */
+  if(m.status!=='transcribing' && m.cloud_resume && m.cloud_resume.done_s>0){
+    var s5=document.createElement('span'); s5.className='dotsep'; s5.textContent='·'; meta.appendChild(s5);
+    var rv=document.createElement('span'); rv.textContent=fmtClock(m.cloud_resume.done_s)+' saved for a retry';
+    rv.title='A cloud run stopped partway. Transcribing again with '+m.cloud_resume.model+' sends only the rest.';
+    meta.appendChild(rv);
+  }
   if(m.status==='error' && m.warning){ var s3=document.createElement('span'); s3.className='dotsep'; s3.textContent='·'; meta.appendChild(s3); var wv=document.createElement('span'); wv.textContent=m.warning; wv.title=m.warning; meta.appendChild(wv); }
   info.appendChild(meta);
   row.appendChild(info);
@@ -985,10 +1296,11 @@ function renderRow(m){
     var tb=document.createElement('button'); tb.className='btn btn-primary small';
     tb.textContent = (m.status==='transcribed')?'Re-transcribe':'Transcribe';
     /* nothing to transcribe with until whisper and the models are installed --
-       better to disable and say why than to fail after the user commits */
-    tb.disabled = busy || !SETUP_OK;
-    if(!SETUP_OK) tb.title = 'Transcription needs whisper and the models - see the notice above';
-    tb.onclick=function(){ openTranscribe(m.id, m.name); };
+       better to disable and say why than to fail after the user commits. The
+       cloud engine needs neither, only a key and ffmpeg. */
+    tb.disabled = busy || !(SETUP_OK || CLOUD.ok);
+    if(!SETUP_OK && !CLOUD.ok) tb.title = 'Transcription needs whisper and the models (see the notice above), or an OpenAI API key under ⚙';
+    tb.onclick=function(){ openTranscribe(m.id, m.name, m.seconds, m.cloud_resume); };
     acts.appendChild(tb);
   }
   if(m.hasOutput){
@@ -1031,16 +1343,103 @@ function toggleSettings(){
   if(g) g.classList.toggle('on', show);
 }
 
-var TX_ID=null;
-function openTranscribe(id, name){
-  TX_ID=id;
-  var d=window.TXDEFAULTS||{lang:'id',min:0,max:0,hf_ok:false};
+var TX_ID=null, TX_SECONDS=0, TX_ENGINE='local', TX_RESUME=null;
+var TX_PARALLEL=true;   /* the user's choice for diarizing models, kept while a plain model greys it out */
+function openTranscribe(id, name, seconds, resume){
+  TX_ID=id; TX_SECONDS=Number(seconds)||0; TX_RESUME=resume||null;
+  TX_PARALLEL = ((window.TXDEFAULTS||{}).cloud_parallel!==false);
+  var d=window.TXDEFAULTS||{lang:'id',min:0,max:0,hf_ok:false,engine:'local',cloud_model:''};
   if($('tx_name')) $('tx_name').textContent=name||'meeting';
   if($('tx_lang')) $('tx_lang').value=d.lang;
   if($('tx_min')) $('tx_min').value=d.min;
   if($('tx_max')) $('tx_max').value=d.max;
-  if($('tx_note')) $('tx_note').textContent = d.hf_ok ? '' : 'No HuggingFace token set — you’ll get a plain transcript with no speaker labels (set one via ⚙).';
+  /* an engine that can't run is shown greyed with the reason, never hidden:
+     the user should see that the other option exists and what it needs */
+  var lc=$('eng_local'), cc=$('eng_cloud');
+  if(lc){ lc.classList.toggle('off', !SETUP_OK); lc.querySelector('input').disabled = !SETUP_OK;
+          $('eng_local_d').textContent = SETUP_OK ? 'whisper large-v3 + pyannote. Free, slower, nothing leaves the machine.'
+                                                  : 'Not installed yet — see the setup notice above.'; }
+  if(cc){ cc.classList.toggle('off', !CLOUD.ok); cc.querySelector('input').disabled = !CLOUD.ok;
+          $('eng_cloud_d').textContent = CLOUD.ok ? 'Uploads the audio to OpenAI. Fast, billed to your OpenAI account.'
+                                       : (!CLOUD.key_ok ? 'Needs an OpenAI API key — add one under ⚙.' : 'Needs ffmpeg to prepare the upload — see the setup notice above.'); }
+  var eng = d.engine||'local';
+  if(eng==='cloud' && !CLOUD.ok) eng='local';
+  if(eng==='local' && !SETUP_OK && CLOUD.ok) eng='cloud';
+  if($('tx_cloud_model') && d.cloud_model) $('tx_cloud_model').value = d.cloud_model;
+  onTxEngine(eng);
   $('tx_modal').classList.add('show');
+}
+function onTxEngine(eng){
+  TX_ENGINE = eng;
+  var r=document.querySelector('input[name="tx_engine"][value="'+eng+'"]'); if(r) r.checked=true;
+  var lc=$('eng_local'), cc=$('eng_cloud');
+  if(lc) lc.classList.toggle('on', eng==='local');
+  if(cc) cc.classList.toggle('on', eng==='cloud');
+  var cloud = (eng==='cloud');
+  if($('tx_cloud_row')) $('tx_cloud_row').hidden = !cloud;
+  if($('tx_par_row')) $('tx_par_row').hidden = !cloud;
+  /* the OpenAI models find the speaker count themselves; min/max is pyannote's */
+  if($('tx_min_row')) $('tx_min_row').hidden = cloud;
+  if($('tx_max_row')) $('tx_max_row').hidden = cloud;
+  var d=window.TXDEFAULTS||{};
+  if($('tx_note')) $('tx_note').textContent = (!cloud && !d.hf_ok) ? 'No HuggingFace token set — you’ll get a plain transcript with no speaker labels (set one via ⚙).' : '';
+  updateEstimate();
+}
+function onTxCloudModel(v){ updateEstimate(); }
+function onTxParallel(on){ TX_PARALLEL = !!on; updateEstimate(); }
+/* The parallel switch follows the model: a plain model has no voices to keep
+   consistent, so it always runs in parallel and the switch shows that, greyed.
+   Returns whether this run will send parts side by side. */
+function syncParallel(m){
+  var cb=$('tx_parallel'), lab=$('tx_par_lab'), note=$('tx_par_note');
+  var can = !!(m && m.diarize);
+  var on = can ? TX_PARALLEL : true;
+  if(cb){ cb.disabled = !can; cb.checked = on; }
+  if(lab) lab.classList.toggle('off', !can);
+  if(note) note.textContent = !can
+    ? 'Only for models that label speakers. This one always sends parts in parallel: there are no voices to keep consistent.'
+    : on
+      ? 'Faster. Voices are learned from the first part only, so someone who first speaks later gets a new speaker number in each part.'
+      : 'One part at a time, each learning the voices from every part before it, so someone who joins late keeps one speaker number (up to four voices at once). Slower, same price.';
+  return on;
+}
+/* The price, before anything is uploaded. Duration comes from meta.json;
+   0 means it isn't known (an old row), in which case the rate alone is shown. */
+function updateEstimate(){
+  var box=$('tx_est'); if(!box) return;
+  var cloud = (TX_ENGINE==='cloud');
+  box.hidden = !cloud;
+  var note=$('tx_cloud_note');
+  if(!cloud) return;
+  var m = cloudModel(($('tx_cloud_model')||{}).value);
+  if(!m){ box.textContent=''; return; }
+  if(note) note.textContent = m.note;
+  var par = syncParallel(m);
+  box.innerHTML='';
+  var line=document.createElement('div');
+  if(TX_SECONDS>0){
+    var lang=(($('tx_lang')||{}).value)||'';
+    var send = pendingSeconds(TX_SECONDS, TX_RESUME, m.key, lang, CLOUD.chunk_s);
+    var usd = estimateUsd(send, m.usd_per_min);
+    line.appendChild(document.createTextNode('Estimated cost: '));
+    var b=document.createElement('b'); b.textContent='about '+fmtUsd(usd); line.appendChild(b);
+    var saved = TX_SECONDS - send;
+    line.appendChild(document.createTextNode(
+      (saved > 0 ? ' for the remaining '+fmtClock(send) : ' for '+fmtClock(TX_SECONDS))+' at '+rateText(m)));
+    box.appendChild(line); line=null;
+    var eta = etaSeconds(send, m.speed, m.diarize, CLOUD.chunk_s, par ? CLOUD.concurrency : 1);
+    var e=document.createElement('div');
+    e.textContent = (saved > 0 ? fmtClock(saved)+' is saved from the last attempt and isn’t paid again. ' : '')
+                  + (eta > 0 ? 'Takes about '+Math.max(1, Math.round(eta/60))+' min.' : '');
+    if(e.textContent) box.appendChild(e);
+  } else {
+    line.appendChild(document.createTextNode('Billed at '+rateText(m)+' of audio (length of this recording unknown).'));
+  }
+  if(line) box.appendChild(line);
+  var sm=document.createElement('span'); sm.className='small';
+  sm.textContent=rateNote(m)+' Billed to your OpenAI account; the audio is uploaded to OpenAI.'
+      + (m.diarize ? '' : ' This model does not label speakers.');
+  box.appendChild(sm);
 }
 function closeTranscribe(){ $('tx_modal').classList.remove('show'); TX_ID=null; }
 function startTranscribe(){
@@ -1048,10 +1447,18 @@ function startTranscribe(){
   var mn=parseInt(($('tx_min')||{}).value,10); if(isNaN(mn)||mn<0) mn=0;
   var mx=parseInt(($('tx_max')||{}).value,10); if(isNaN(mx)||mx<0) mx=0;
   var lang=((($('tx_lang')||{}).value)||'id').trim()||'id';
-  post('transcribe',{id:TX_ID, lang:lang, min_speakers:mn, max_speakers:mx});
+  var msg={id:TX_ID, lang:lang, min_speakers:mn, max_speakers:mx, engine:TX_ENGINE};
+  if(TX_ENGINE==='cloud'){
+    msg.cloud_model = (($('tx_cloud_model')||{}).value)||'';
+    /* the user's choice, not the greyed-out display of a plain model */
+    msg.parallel = TX_PARALLEL;
+  }
+  post('transcribe', msg);
   closeTranscribe();
 }
 document.addEventListener('keydown', function(e){ if(e.key==='Escape'){ closeTranscribe(); } });
+/* saved parts only count for the language they were made in */
+(function(){ var l=$('tx_lang'); if(l) l.addEventListener('input', updateEstimate); })();
 (function(){ var m=$('tx_modal'); if(m) m.addEventListener('click', function(e){ if(e.target===m) closeTranscribe(); }); })();
 
 window.showToast = function(text, kind){

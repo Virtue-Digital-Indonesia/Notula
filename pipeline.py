@@ -235,7 +235,7 @@ def _run_diarize(wav, json_path, merged, token, mn, mx, tx_python, emit, on_proc
 
 def _write_output(output: Path, txt_path: Path, merged: Optional[Path], *,
                   meeting, lang, model, duration, min_speakers, max_speakers,
-                  diar_ok, warn) -> None:
+                  diar_ok, warn, extra: Optional[list[str]] = None) -> None:
     body = (merged if merged else txt_path).read_text("utf-8")
     d = int(duration)
     h, mm, s = d // 3600, d % 3600 // 60, d % 60
@@ -245,8 +245,7 @@ def _write_output(output: Path, txt_path: Path, merged: Optional[Path], *,
         f"# Meeting: {meeting}",
         f"# Duration: {h:02d}:{mm:02d}:{s:02d}   Language: {lang}   Model: {model}",
         f"# Speakers: {spk}   Diarization: {diar}",
-        "",
-    ]
+    ] + list(extra or []) + [""]
     output.write_text("\n".join(head) + body.rstrip() + "\n", "utf-8")
 
 

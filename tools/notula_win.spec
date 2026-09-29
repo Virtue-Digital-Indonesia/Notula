@@ -40,7 +40,7 @@ datas += collect_data_files("webview")
 hiddenimports = [
     # our own modules — imported dynamically or only on this platform, so
     # PyInstaller's static analysis doesn't always see them
-    "appcore", "config", "library", "recorder", "pipeline", "dsp", "osutil",
+    "appcore", "config", "library", "recorder", "pipeline", "cloud", "dsp", "osutil",
     "toolpaths", "live", "permissions", "permissions_win",
     "sysaudio", "sysaudio_win", "pyaudiowpatch",
     # tkinter powers the confirm / alert / token dialogs

@@ -27,6 +27,7 @@ import shutil
 import sys
 import threading
 
+import cloud
 import config
 import deps
 import library
@@ -298,6 +299,11 @@ def selftest(wav=None) -> int:
     print(f"SELFTEST: system audio   {sysaudio.BACKEND} available={sysaudio.AVAILABLE}")
     print(f"SELFTEST: hf token set   {bool(token)}"
           f"{'' if token else '  (no speaker labels without one)'}")
+    okey = config.openai_key(cfg)
+    print(f"SELFTEST: engine         {cfg['engine']}"
+          f"{'  (' + cfg['cloud_model'] + ')' if cfg['engine'] == 'cloud' else ''}")
+    print(f"SELFTEST: openai key set {bool(okey)}"
+          f"{'' if okey or cfg['engine'] != 'cloud' else '  (cloud engine needs one)'}")
     missing = []
     for label, path, ok, required in checks:
         mark = "ok " if ok else ("MISSING" if required else "absent ")
@@ -358,6 +364,7 @@ class AppCore:
         self.tx_mid = None
         self._tx_progress = None
         self._tx_proc = None
+        self._tx_cancel = None        # set on quit, so a cloud run stops at its next event
         self._tick_count = 0
         self._last_dark = None
         self._torn = False
@@ -530,10 +537,24 @@ class AppCore:
                 "auto_transcribe": self.cfg["auto_transcribe"],
                 "hf_ok": bool(token),
                 "hf_token_masked": ("•" * 12) if self.cfg.get("hf_token") else "",
+                "engine": self.cfg.get("engine") or "local",
+                "cloud_model": cloud.resolve_model(self.cfg.get("cloud_model")),
+                "cloud_parallel": bool(self.cfg.get("cloud_parallel", True)),
+                "openai_ok": bool(config.openai_key(self.cfg)),
                 "live_enabled": bool(self.cfg.get("live_enabled")),
                 "live_model": self.cfg.get("live_model") or live.DEFAULT_MODEL,
+                # how the meetings list was left; search and date filter are
+                # deliberately not persisted — they're a momentary intent, and
+                # reopening to a filtered list that hides your recordings would
+                # look like they had vanished
+                "meetings_collapsed": bool(self.cfg.get("meetings_collapsed")),
+                "meetings_limit": int(self.cfg.get("meetings_limit") or 0),
             },
             "live_models": live.available_models(),
+            # the cloud engine: what it costs per model, and whether it can run
+            # (a key, and ffmpeg to prepare the upload). The page prices each
+            # meeting from this before anything is sent.
+            "cloud": self._cloud_summary(),
             "inputs": self._devices,
             "mic_selected": self.mic_idx,
             "system_capture": self.system_on,
@@ -622,7 +643,10 @@ class AppCore:
             self._transcribe(str(body.get("id") or ""),
                              lang=body.get("lang"),
                              min_speakers=body.get("min_speakers"),
-                             max_speakers=body.get("max_speakers"))
+                             max_speakers=body.get("max_speakers"),
+                             engine=body.get("engine"),
+                             cloud_model=body.get("cloud_model"),
+                             parallel=body.get("parallel"))
         elif action == "toggleMonitor":
             self._toggle_monitor()
         elif action == "importAudio":
@@ -649,9 +673,17 @@ class AppCore:
             self._set_lang(str(body.get("value") or ""))
         elif action == "setToken":
             self._set_token(str(body.get("value") or ""))
+        elif action == "setOpenAIKey":
+            self._set_openai_key(str(body.get("value") or ""))
+        elif action == "setEngine":
+            self._set_engine(str(body.get("value") or ""))
+        elif action == "setCloudModel":
+            self._set_cloud_model(str(body.get("value") or ""))
         elif action == "setAuto":
             self.cfg["auto_transcribe"] = bool(body.get("value"))
             config.save(self.cfg)
+        elif action == "setMeetingsView":
+            self._set_meetings_view(body)
         elif action == "systemHelp":
             self._system_help()
         elif action == "setupHelp":
@@ -1084,13 +1116,25 @@ class AppCore:
 
     # ---- transcription ----
 
-    def _transcribe(self, mid, lang=None, min_speakers=None, max_speakers=None):
+    def _transcribe(self, mid, lang=None, min_speakers=None, max_speakers=None,
+                    engine=None, cloud_model=None, parallel=None):
         if not mid or self.tx_mid or self.rec is not None:
             return
         # per-transcription settings from the dialog also become the saved defaults
         changed = False
         if lang:
             self.cfg["lang"] = str(lang).strip()[:8] or "id"
+            changed = True
+        if engine in ("local", "cloud"):
+            self.cfg["engine"] = engine
+            changed = True
+        if cloud_model in cloud.MODELS:
+            self.cfg["cloud_model"] = cloud_model
+            changed = True
+        if isinstance(parallel, bool):
+            # only a diarizing model uses it, but it's remembered either way so
+            # the dialog comes back the way it was left
+            self.cfg["cloud_parallel"] = parallel
             changed = True
         for key, val in (("min_speakers", min_speakers), ("max_speakers", max_speakers)):
             if val is not None:
@@ -1107,6 +1151,19 @@ class AppCore:
         if not os.path.exists(wav):
             self._toast("No recording found for that meeting", "err")
             return
+        use_cloud = self.cfg.get("engine") == "cloud"
+        if use_cloud:
+            # Money leaves the account the moment the upload lands, so the
+            # things that would make it fail are checked here, not in the worker.
+            if not config.openai_key(self.cfg):
+                self._toast("The cloud engine needs an OpenAI API key — add one "
+                            "under ⚙, or switch the engine back to this computer.",
+                            "err")
+                return
+            if not os.path.exists(pipeline.FFMPEG):
+                self._toast("ffmpeg is needed to prepare the upload — see the "
+                            "setup notice above.", "err")
+                return
         # Mark it busy before claiming it: if this write fails after tx_mid is
         # set, no worker exists to ever clear it and the app can neither record
         # nor transcribe again.
@@ -1117,11 +1174,40 @@ class AppCore:
             return
         self.tx_mid = mid
         self._tx_progress = {"id": mid, "frac": 0.0, "msg": "starting…"}
+        self._tx_cancel = threading.Event()
+        if use_cloud:
+            est = self._estimate(mid)
+            model = cloud.resolve_model(self.cfg.get("cloud_model"))
+            what = (f"for the remaining {fmt_elapsed(est['seconds'])} — "
+                    f"{fmt_elapsed(est['saved'])} is saved from the last attempt"
+                    if est.get("saved") else f"for {fmt_elapsed(est['seconds'])}")
+            par = cloud.runs_parallel(model, self.cfg.get("cloud_parallel", True))
+            mins = max(1, round(cloud.eta_seconds(est["seconds"], model, par) / 60))
+            self._toast(f"Sending to OpenAI ({model}) · {est['text']} {what} · "
+                        f"takes about {mins} min"
+                        + ("" if par else ", one part at a time"), "info")
         self._push_state()
         self._push_meetings()
-        threading.Thread(target=self._do_transcribe, args=(mid, wav), daemon=True).start()
+        threading.Thread(target=self._do_transcribe, args=(mid, wav, use_cloud),
+                         daemon=True).start()
 
-    def _do_transcribe(self, mid, wav):
+    def _estimate(self, mid) -> dict:
+        """What the cloud engine would charge for this meeting: its length from
+        meta.json (or the file itself if meta has none), less what an earlier,
+        interrupted run already paid for, at the rate this user's runs have
+        actually cost when there is one."""
+        root = self.cfg["library"]
+        secs = library.describe(root, mid).get("seconds") or 0
+        if not secs:
+            secs = pipeline.probe_duration(pipeline.Path(library.audio_path(root, mid)))
+        model = cloud.resolve_model(self.cfg.get("cloud_model"))
+        saved = cloud.saved_seconds(library.folder(root, mid), model, self.cfg["lang"])
+        est = cloud.estimate(max(0.0, secs - saved), model,
+                             (self.cfg.get("cloud_rates") or {}).get(model))
+        est["saved"] = saved
+        return est
+
+    def _do_transcribe(self, mid, wav, use_cloud=False):
         root = self.cfg["library"]
         out_dir = library.folder(root, mid)
         token = config.hf_token(self.cfg)
@@ -1130,17 +1216,29 @@ class AppCore:
             self.host.on_main(self._tx_progress_update, mid, frac, msg)
 
         try:
-            result = pipeline.transcribe_meeting(
-                wav, out_dir,
-                lang=self.cfg["lang"],
-                min_speakers=self.cfg["min_speakers"] or None,
-                max_speakers=self.cfg["max_speakers"] or None,
-                model=self.cfg["model"],
-                hf_token=token,
-                diarize=True,
-                progress_cb=on_progress,
-                on_proc=self._set_tx_proc,
-            )
+            if use_cloud:
+                result = cloud.transcribe_meeting(
+                    wav, out_dir,
+                    model=self.cfg.get("cloud_model"),
+                    key=config.openai_key(self.cfg),
+                    lang=self.cfg["lang"],
+                    progress_cb=on_progress,
+                    on_proc=self._set_tx_proc,
+                    cancel=self._tx_cancel,
+                    parallel=bool(self.cfg.get("cloud_parallel", True)),
+                )
+            else:
+                result = pipeline.transcribe_meeting(
+                    wav, out_dir,
+                    lang=self.cfg["lang"],
+                    min_speakers=self.cfg["min_speakers"] or None,
+                    max_speakers=self.cfg["max_speakers"] or None,
+                    model=self.cfg["model"],
+                    hf_token=token,
+                    diarize=True,
+                    progress_cb=on_progress,
+                    on_proc=self._set_tx_proc,
+                )
             self.host.on_main(self._tx_done, mid, result)
         except pipeline.PipelineError as e:
             self.host.on_main(self._tx_failed, mid, str(e))
@@ -1156,12 +1254,17 @@ class AppCore:
 
     def _tx_done(self, mid, result):
         root = self.cfg["library"]
+        is_cloud = result.get("engine") == "cloud"
         try:
             library.update_meta(
                 root, mid, status=library.TRANSCRIBED,
                 duration=result.get("duration") or 0,
                 diarized=bool(result.get("diarized")),
                 warning=result.get("warning"),
+                engine="cloud" if is_cloud else "local",
+                model=result.get("model") or self.cfg["model"],
+                cost_usd=(round(float(result.get("cost_usd") or 0), 4)
+                          if is_cloud else None),
             )
         except OSError as e:      # see _on_stopped: never leave tx_mid stuck
             self._toast(f"Transcribed, but its details couldn't be written: {e}", "err")
@@ -1169,8 +1272,20 @@ class AppCore:
             self.tx_mid = None
             self._tx_progress = None
             self._tx_proc = None
+        if is_cloud:
+            self._learn_rate(result)
         self._push_state()
         self._push_meetings()
+        if is_cloud:
+            cost = cloud.fmt_usd(float(result.get("cost_usd") or 0))
+            tail = (f" · OpenAI cost {cost}" if not result.get("cost_estimated")
+                    else f" · OpenAI, about {cost}")
+            if result.get("diarized"):
+                self._toast(f"Transcribed with speakers ✓{tail}", "ok")
+            else:
+                self._toast(f"Transcribed (plain — {result.get('warning') or 'no speaker labels'})"
+                            f"{tail}", "warn")
+            return
         if result.get("diarized"):
             self._toast("Transcribed with speakers ✓", "ok")
         else:
@@ -1183,6 +1298,28 @@ class AppCore:
                             "warn")
             else:
                 self._toast(f"Transcribed (plain — {why})", "warn")
+
+    def _learn_rate(self, result):
+        """Fold what this run really cost per minute into the rate the next
+        estimate uses. Only exact costs count, and only runs long enough to be
+        representative; averaged with the previous figure so one unusually
+        quiet or talkative meeting doesn't swing it."""
+        if result.get("cost_estimated"):
+            return
+        mins = float(result.get("duration") or 0) / 60.0
+        cost = float(result.get("cost_usd") or 0)
+        model = result.get("model")
+        if mins < 1.0 or cost <= 0 or model not in cloud.MODELS:
+            return
+        if cloud.MODELS[model]["billing"] == "duration":
+            return                      # billed by length: the rate is already exact
+        seen = cost / mins
+        rates = dict(self.cfg.get("cloud_rates") or {})
+        old = rates.get(model)
+        rates[model] = round((old + seen) / 2.0 if old else seen, 6)
+        self.cfg["cloud_rates"] = rates
+        config.save(self.cfg)
+        self._push_init()
 
     def _tx_failed(self, mid, err):
         summary = error_summary(err)
@@ -1333,6 +1470,22 @@ class AppCore:
                         f"grant it, then it captures on your next recording.", "info")
         self._push_state()
 
+    def _set_meetings_view(self, body):
+        """Remember how the meetings list was left — folded, and how many rows.
+
+        Saved without pushing anything back: the page already shows what the user
+        just did, and a re-render would fight their typing in the search box.
+        """
+        if "collapsed" in body:
+            self.cfg["meetings_collapsed"] = bool(body.get("collapsed"))
+        if "limit" in body:
+            lo, hi = config._NUM_BOUNDS["meetings_limit"]
+            try:
+                self.cfg["meetings_limit"] = min(hi, max(lo, int(body.get("limit"))))
+            except (TypeError, ValueError):
+                pass
+        config.save(self.cfg)
+
     def _set_mute(self, kind, muted):
         if kind not in ("mic", "system"):
             return
@@ -1371,6 +1524,45 @@ class AppCore:
         self._push_init()
         self._toast("Token saved" if value else "Token cleared",
                     "ok" if value else "info")
+
+    def _set_openai_key(self, value):
+        value = (value or "").strip()
+        if value and set(value) == {"•"}:      # the masked placeholder, echoed back
+            return
+        self.cfg["openai_api_key"] = value
+        config.save(self.cfg)
+        self._push_init()
+        self._toast("OpenAI key saved" if value else "OpenAI key cleared",
+                    "ok" if value else "info")
+
+    def _set_engine(self, value):
+        if value not in ("local", "cloud"):
+            return
+        self.cfg["engine"] = value
+        config.save(self.cfg)
+        self._push_init()
+        if value == "cloud" and not config.openai_key(self.cfg):
+            self._toast("Cloud engine selected — add your OpenAI API key below "
+                        "before transcribing.", "warn")
+
+    def _set_cloud_model(self, value):
+        if value not in cloud.MODELS:
+            return
+        self.cfg["cloud_model"] = value
+        config.save(self.cfg)
+        self._push_init()
+
+    def _cloud_summary(self) -> dict:
+        return {
+            "models": cloud.available_models(self.cfg.get("cloud_rates")),
+            "chunk_s": cloud.CHUNK_S,
+            "concurrency": cloud.CONCURRENCY,
+            "key_ok": bool(config.openai_key(self.cfg)),
+            "ffmpeg_ok": os.path.exists(pipeline.FFMPEG),
+            "ok": bool(config.openai_key(self.cfg)) and os.path.exists(pipeline.FFMPEG),
+            "prices_checked": cloud.PRICES_CHECKED,
+            "keys_url": cloud.KEYS_URL,
+        }
 
     def _pick_library(self):
         """Browse for a library folder.
@@ -1548,6 +1740,9 @@ class AppCore:
                 self.rec.stop()     # finalize the WAV so a recording isn't lost on quit
             except Exception:
                 pass
-        # don't orphan a running whisper/diarize on quit
+        # don't orphan a running whisper/diarize on quit, or keep paying for a
+        # cloud run nobody will see the end of
+        if self._tx_cancel is not None:
+            self._tx_cancel.set()
         osutil.kill_tree(self._tx_proc)
         self._tx_proc = None

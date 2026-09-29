@@ -74,10 +74,84 @@ button and a library in front of it.
    speaker diarization, and writes `output.txt` — the merged, speaker-labeled
    transcript. Progress streams into the UI. If diarization can't run (no token,
    offline), you still get the plain transcript.
+7. **Or transcribe in the cloud** — the same dialog offers OpenAI's
+   `gpt-4o-transcribe-diarize` instead of the local pass. It shows the
+   **estimated cost and time before you start** ("about $1.08 for 1:00:00 at
+   ~$0.018/min · takes about 8 min"), uploads the audio, and writes the same
+   `output.txt` with speaker labels from OpenAI's own diarization. No models,
+   no HuggingFace token and no torch venv are needed — just an API key and
+   ffmpeg. See *Cloud transcription* below.
 
-App-level settings (HuggingFace token, library folder) live behind the **⚙ gear**
-in the header — hidden by default, since day-to-day you only touch record and
-transcribe.
+App-level settings (HuggingFace token, OpenAI key, default engine, library
+folder) live behind the **⚙ gear** in the header — hidden by default, since
+day-to-day you only touch record and transcribe.
+
+## Cloud transcription
+
+Pick **OpenAI cloud** in the Transcribe dialog (or make it the default under
+⚙). It needs two things: an OpenAI API key (⚙, or `$OPENAI_API_KEY`) and
+ffmpeg. Nothing else from the local setup is used, so a machine with no
+whisper models can still transcribe this way.
+
+| model | per minute | billed by | speaker labels |
+|---|---|---|---|
+| **gpt-4o-transcribe-diarize** | ~$0.018 | tokens | yes — the one to use for meetings |
+| gpt-transcribe | $0.0045 | audio length | no — OpenAI's newest plain model, four times cheaper |
+
+(`gpt-4o-transcribe` and `gpt-4o-mini-transcribe` are deliberately not offered:
+`gpt-transcribe` replaces both, cheaper. Adding a model is one entry in
+`cloud.MODELS`.)
+
+**What it really costs.** OpenAI publishes $0.006/min for the diarize model,
+but bills it per token ($2.50/M in, $10/M out), and the speaker labels and
+timestamps it writes are output tokens. Measured on a real meeting it came to
+$0.018/min, so that is where the estimate starts. After each run the app
+learns the rate you actually paid and uses it for the next estimate; the
+dialog says which figure it is showing. The cost after a run — in the toast,
+the meeting row and the `# Engine:` line of `output.txt` — is computed from
+the token counts OpenAI reports, not estimated. Prices checked 2026-09-29
+(`cloud.PRICES_CHECKED`).
+
+**Batching doesn't help.** OpenAI's Batch API is half price, but it doesn't
+accept audio transcription. What does help is running parts in parallel,
+which the app does: the price is per minute of audio however it is split.
+
+**How a long meeting gets through.** The API takes one file of at most 25 MB
+and about 25 minutes, so the recording is cut into 5-minute parts, each cut
+nudged onto the nearest pause (`ffmpeg silencedetect`) and encoded as a 32 kbps
+mono mp3. Every part is *streamed*: OpenAI sends each segment as soon as it is
+finished, so the connection is never idle, the progress bar tracks real audio
+time, and a part that goes quiet for 2 minutes is dropped and retried. (Before
+streaming, a part sat silent for its whole processing time, and on a real
+network that idle connection was cut without either side noticing.) The first
+part runs alone; the rest go four at a time, unless you switch that off (see
+below). A 97-minute meeting takes about 13 minutes; a 13-minute one measured 3½.
+
+**Speaker names stay stable across parts.** OpenAI labels voices from scratch
+in every request, but it honours up to four named reference clips. How those
+clips are chosen is a switch in the Transcribe dialog, **Send parts in
+parallel**, because it trades speed for consistency:
+
+| | on (default) | off |
+|---|---|---|
+| order | part one alone, then four at a time | one part at a time |
+| voices sent with each part | the most talkative from part one | the most talkative from every part so far |
+| someone who first speaks after part one | a new number in each part | learned in their first part, one number after that |
+| 97-minute meeting | about 13 min | about 44 min |
+| price | same | same |
+
+Either way at most four voices can be carried at once. The switch only applies
+to a model that labels speakers, so it is greyed out for `gpt-transcribe`, which
+always runs in parallel. The dialog remembers the last choice, and that choice
+also applies when a recording is transcribed automatically.
+
+**A failed run isn't paid for twice.** Each finished part is saved in the
+meeting folder (`.cloud-parts/`) as it arrives. If some parts fail, the row
+says how much is saved, and transcribing again sends only the missing parts —
+the estimate prices only those. The folder is removed when a run completes.
+
+The audio leaves your machine and is billed to your account. The local engine
+sends nothing anywhere.
 
 ## Requirements
 
@@ -228,6 +302,8 @@ Each meeting folder (`~/Documents/Notula/<date>_<name>/`, or
 | `transcript.json` | whisper raw output |
 | `transcript.txt` | plain transcript |
 | `transcript.merged.txt` | speaker-labeled transcript |
+| `transcript.cloud.json` | every part as OpenAI returned it (cloud engine only) |
+| `.cloud-parts/` | finished parts of an interrupted cloud run, reused by the next one |
 | `live.txt` | the live preview, if it was on (never the deliverable) |
 | **`output.txt`** | **the canonical file** — merged transcript + a small `#` header |
 
@@ -244,6 +320,10 @@ Stored privately in `~/.config/notula/notula.json` (owner-only), or
 - **HuggingFace token** — needed for pyannote diarization. Also read from
   `$HF_TOKEN` if set. Without it, meetings still transcribe (plain text only).
 - **Live transcript** — on/off and which model; see *What it does*
+- **Transcription engine** — *On this computer* or *OpenAI cloud*; the default
+  for the dialog and for automatic transcription. Overridable per meeting.
+- **OpenAI model** and **OpenAI API key** — for the cloud engine. The key is
+  also read from `$OPENAI_API_KEY`. See *Cloud transcription*.
 - **Library folder** — where meeting folders are created
 
 ## The two audio sources
@@ -305,6 +385,7 @@ toolpaths.py          finds ffmpeg / whisper / models / tx-venv per platform
 
 library.py            meeting folders + meta.json
 pipeline.py           whisper-cli + diarize + merge (stdlib only; shells out)
+cloud.py              the OpenAI engine: pricing, chunking, upload, speaker continuity
 live.py               near-realtime transcript via whisper-server
 diarize_and_merge.py  pyannote diarization (runs in the transcription venv)
 config.py             settings (~/.config/notula/ or %APPDATA%\Notula\)
@@ -319,7 +400,7 @@ tools/installer.iss   Inno Setup config (Notula-Setup-2.0.0-beta1.exe)
 tools/build_windows.ps1  build the .exe + installer in one command
 tools/setup_windows.ps1  fetch ffmpeg / whisper.cpp / models on Windows
 docs/windows.md       Windows setup, packaging, and what's still untested
-tests/run_all.py      the suites — resampler, appcore, Windows shell threading
+tests/run_all.py      the suites — resampler, appcore, cloud engine, Windows shell threading
 ```
 
 ## Tests
@@ -330,6 +411,8 @@ tests/run_all.py      the suites — resampler, appcore, Windows shell threading
 ```
 
 Plain scripts, no framework. They cover the resampler, the whole `AppCore`
-dispatch surface (against a stub host), and the Windows shell's threading model —
-none of which needs an audio device, so they're meaningful on both platforms.
+dispatch surface (against a stub host), the cloud engine (against a stub of
+OpenAI's endpoint on localhost — no key or account needed), and the Windows
+shell's threading model — none of which needs an audio device, so they're
+meaningful on both platforms.
 For anything that does touch hardware, `--selftest` runs the real pipeline.

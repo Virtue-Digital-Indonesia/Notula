@@ -7,6 +7,7 @@ import os
 import pathlib
 import sys
 import tempfile
+import threading
 
 TMP = tempfile.mkdtemp(prefix="notula-test-")
 # Redirect config on BOTH platforms before importing anything: osutil.config_dir
@@ -19,9 +20,18 @@ os.environ["NOTULA_THEME"] = "dark"          # deterministic, no host theme call
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
+import json                              # noqa: E402
 import appcore, config, library          # noqa: E402
 
 fail = []
+
+
+# run directly on a cp1252 console (Windows), a glyph in a detail string must
+# not turn into a crash mid-suite
+try:
+    sys.stdout.reconfigure(errors="replace")
+except (AttributeError, ValueError):
+    pass
 
 
 def check(name, cond, detail=""):
@@ -140,6 +150,121 @@ check("masked token ignored", core.cfg["hf_token"] == "hf_stub_token")
 core.dispatch({"action": "setToken", "value": "hf_real"})
 check("setToken", core.cfg["hf_token"] == "hf_real")
 
+# ---- the cloud engine: settings, gating, and what a run leaves behind ----------
+import cloud                                  # noqa: E402
+check("init carries the cloud menu", "cloud" in init and init["cloud"]["models"], init.get("cloud"))
+check("parallel is the default", init["settings"]["cloud_parallel"] is True)
+check("init settings carry the engine", init["settings"]["engine"] == "local"
+      and init["settings"]["cloud_model"] == cloud.DEFAULT_MODEL, init["settings"].get("engine"))
+
+core.dispatch({"action": "setOpenAIKey", "value": "•" * 12})
+check("masked OpenAI key ignored", core.cfg["openai_api_key"] == "")
+core.dispatch({"action": "setOpenAIKey", "value": " sk-test-key "})
+check("setOpenAIKey trims + persists", core.cfg["openai_api_key"] == "sk-test-key")
+init_k = [a[0] for f, a in host.js_calls if f == "notulaInit"][-1]
+check("the key itself never reaches the page",
+      "sk-test-key" not in json.dumps(init_k) and init_k["settings"]["openai_ok"] is True)
+
+core.dispatch({"action": "setCloudModel", "value": "gpt-9-nope"})
+check("unknown cloud model rejected", core.cfg["cloud_model"] == cloud.DEFAULT_MODEL)
+core.dispatch({"action": "setCloudModel", "value": "gpt-transcribe"})
+check("setCloudModel", core.cfg["cloud_model"] == "gpt-transcribe")
+core.dispatch({"action": "setEngine", "value": "bogus"})
+check("unknown engine rejected", core.cfg["engine"] == "local")
+core.dispatch({"action": "setEngine", "value": "cloud"})
+check("setEngine", core.cfg["engine"] == "cloud")
+
+# no key: the cloud engine refuses before touching the meeting
+core.cfg["openai_api_key"] = ""
+os.environ.pop("OPENAI_API_KEY", None)
+core.dispatch({"action": "setEngine", "value": "cloud"})
+check("choosing cloud without a key warns", any("OpenAI API key" in t for t in host.toasts))
+cloud_mid = library.create_meeting(lib, "Cloud meeting")
+library.update_meta(lib, cloud_mid, status=library.RECORDED, duration=3600)
+with open(library.audio_path(lib, cloud_mid), "wb") as fh:
+    fh.write(b"RIFF")
+n = len(host.toasts)
+core.dispatch({"action": "transcribe", "id": cloud_mid, "engine": "cloud"})
+check("cloud transcribe without a key stops with a clear toast",
+      core.tx_mid is None and "OpenAI API key" in host.toasts[-1], host.toasts[-1])
+check("...and leaves the meeting untouched",
+      library.read_meta(lib, cloud_mid)["status"] == library.RECORDED)
+
+# with a key: the worker is the cloud module, it's told the price up front, and
+# meta.json records the engine, model and what it cost
+core.cfg["openai_api_key"] = "sk-test-key"
+# an earlier cloud run of this meeting stopped halfway: its first 30 minutes
+# are saved, so only the rest should be priced (the suite's language is "en")
+DIAR = "gpt-4o-transcribe-diarize"
+cloud._PartCache(pathlib.Path(library.folder(lib, cloud_mid)), DIAR, "en").save(
+    0.0, 1800.0, {"start": 0.0, "end": 1800.0, "segments": []})
+check("the row reports what a retry would reuse",
+      (library.describe(lib, cloud_mid).get("cloud_resume") or {}).get("done_s") == 1800.0)
+calls = []
+def fake_cloud(wav, out_dir, **kw):
+    calls.append(kw)
+    kw["progress_cb"]("upload", 0.5, "uploading…")
+    out = pathlib.Path(out_dir); (out / "output.txt").write_text("# x\nhi\n")
+    return {"wav": wav, "json": None, "txt": None, "merged": None, "output": out / "output.txt",
+            "duration": 3600.0, "diarized": True, "warning": None, "engine": "cloud",
+            "model": kw["model"], "chunks": 3, "cost_usd": 0.36, "cost_estimated": False,
+            "speakers": 2}
+real_cloud_tx = cloud.transcribe_meeting
+cloud.transcribe_meeting = fake_cloud
+# ffmpeg is checked before the upload; this suite redirects LOCALAPPDATA to a
+# temp dir, so on Windows the real path resolves nowhere. Fake it, as the setup
+# tests below do.
+import pipeline as _pl                          # noqa: E402
+_real_ffmpeg, _pl.FFMPEG = _pl.FFMPEG, sys.executable
+try:
+    core.dispatch({"action": "transcribe", "id": cloud_mid, "engine": "cloud",
+                   "cloud_model": "gpt-4o-transcribe-diarize", "parallel": False})
+    # the worker is a real thread even against the stub host; give it a moment
+    import time as _time
+    for _ in range(200):
+        if core.tx_mid is None:
+            break
+        _time.sleep(0.02)
+finally:
+    cloud.transcribe_meeting = real_cloud_tx
+    _pl.FFMPEG = _real_ffmpeg
+check("the cloud module ran with the key and model",
+      calls and calls[0]["key"] == "sk-test-key" and calls[0]["model"] == "gpt-4o-transcribe-diarize", calls)
+check("the dialog's choice became the default",
+      core.cfg["engine"] == "cloud" and core.cfg["cloud_model"] == "gpt-4o-transcribe-diarize")
+start_toast = next((t for t in host.toasts if t.startswith("Sending to OpenAI")), "")
+check("the estimate prices only what isn't saved, at the measured rate",
+      "about $0.54" in start_toast and "remaining 30:00" in start_toast
+      and "30:00 is saved" in start_toast, start_toast)
+check("the start toast says how long it takes, one part at a time",
+      "takes about 13 min, one part at a time" in start_toast, start_toast)
+check("the dialog's one-at-a-time choice reaches the run and is remembered",
+      calls[0].get("parallel") is False and core.cfg["cloud_parallel"] is False,
+      (calls[0].get("parallel"), core.cfg["cloud_parallel"]))
+check("the run can be cancelled", isinstance(calls[0].get("cancel"), threading.Event))
+m = library.read_meta(lib, cloud_mid)
+check("meta records engine, model and cost",
+      m["status"] == library.TRANSCRIBED and m["engine"] == "cloud"
+      and m["model"] == "gpt-4o-transcribe-diarize" and m["cost_usd"] == 0.36, m)
+check("the row carries the cost for the page",
+      library.describe(lib, cloud_mid)["cost_usd"] == 0.36 and library.describe(lib, cloud_mid)["seconds"] == 3600.0)
+check("the done toast says what it cost",
+      any("OpenAI cost $0.36" in t for t in host.toasts), host.toasts[-1])
+check("the rate this run really cost is learned",
+      core.cfg["cloud_rates"].get(DIAR) == 0.006, core.cfg["cloud_rates"])
+init_r = [a[0] for f, a in host.js_calls if f == "notulaInit"][-1]
+diar_menu = next(m for m in init_r["cloud"]["models"] if m["key"] == DIAR)
+check("the page is told the learned rate, and that it is learned",
+      diar_menu["usd_per_min"] == 0.006 and diar_menu["rate_source"] == "learned", diar_menu)
+cloud._PartCache(pathlib.Path(library.folder(lib, cloud_mid)), DIAR, "en").clear()
+check("the next estimate uses the learned rate",
+      abs(core._estimate(cloud_mid)["usd"] - 0.36) < 1e-9, core._estimate(cloud_mid))
+junk = config._sanitize(dict(config.DEFAULTS, cloud_rates={
+    DIAR: "abc", "gpt-9": 0.01, "gpt-transcribe": 0.005, "x": float("nan")}))
+check("learned rates are sanitized", junk["cloud_rates"] == {"gpt-transcribe": 0.005}, junk["cloud_rates"])
+check("tx state is clear afterwards", core.tx_mid is None and core._tx_progress is None)
+core.dispatch({"action": "setEngine", "value": "local"})
+
 core.dispatch({"action": "setMute", "kind": "mic", "muted": True})
 check("setMute tracked", core._mute["mic"] is True)
 
@@ -235,6 +360,33 @@ core.dispatch({"action": "setLibrary", "value": ""})
 check("an empty path is refused", core.cfg["library"] == before)
 
 core.cfg["library"] = lib; config.save(core.cfg)   # restore for later checks
+
+# ---- meetings list: timestamps and remembered view -------------------------------
+mm = library.create_meeting(lib, "Timestamped")
+row = next(m for m in library.list_meetings(lib) if m["id"] == mm)
+check("meetings carry a sortable timestamp", isinstance(row.get("ts"), float) and row["ts"] > 0,
+      row.get("ts"))
+check("the id's stamp is a fallback when meta has no date",
+      library.created_ts("2026-08-12_1430_x", "") > 0)
+check("a junk id yields 0 rather than raising", library.created_ts("nonsense", "bad") == 0.0)
+
+core.dispatch({"action": "setMeetingsView", "collapsed": True, "limit": 50})
+check("collapse persists", config.load()["meetings_collapsed"] is True)
+check("row cap persists", config.load()["meetings_limit"] == 50)
+core.dispatch({"action": "setMeetingsView", "limit": 99999})
+check("row cap is clamped", config.load()["meetings_limit"] == 1000,
+      config.load()["meetings_limit"])
+core.dispatch({"action": "setMeetingsView", "limit": "nonsense"})
+check("junk row cap is ignored", config.load()["meetings_limit"] == 1000)
+core.dispatch({"action": "setMeetingsView", "collapsed": False, "limit": 25})
+
+init2 = None
+core.dispatch({"action": "refresh"})
+init2 = [a[0] for f, a in host.js_calls if f == "notulaInit"][-1]
+check("init carries the remembered view",
+      init2["settings"]["meetings_limit"] == 25
+      and init2["settings"]["meetings_collapsed"] is False,
+      init2["settings"].get("meetings_limit"))
 
 # ---- the setup notice ------------------------------------------------------------
 import pipeline                                  # noqa: E402
@@ -372,8 +524,10 @@ for _ in range(5):
     core.tick()
 check("tick pushes state at 2Hz", len(host.js_calls) > before)
 
+tx_cancel = core._tx_cancel
 core.teardown()
 core.teardown()                                  # idempotent
+check("quitting cancels a cloud run", tx_cancel is not None and tx_cancel.is_set())
 check("teardown is idempotent", core._torn is True)
 
 print()

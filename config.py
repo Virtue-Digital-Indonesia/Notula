@@ -39,10 +39,17 @@ DEFAULTS = {
     "max_speakers": 0,               # 0 = auto-detect
     "auto_transcribe": False,        # transcribe automatically when a recording stops
     "hf_token": "",                  # HuggingFace token for pyannote (or set $HF_TOKEN)
+    "engine": "local",               # local (whisper-cli + pyannote) | cloud (OpenAI)
+    "cloud_model": "gpt-4o-transcribe-diarize",   # which OpenAI model (see cloud.MODELS)
+    "openai_api_key": "",            # OpenAI API key for the cloud engine (or $OPENAI_API_KEY)
+    "cloud_rates": {},               # $/min each cloud model actually cost on this user's runs
+    "cloud_parallel": True,          # send diarized parts side by side (fast) or one at a time
     "live_enabled": False,           # live transcript while recording (toggle any time)
     "live_model": "large-v3-turbo",  # which model the live tier uses (see live.MODELS)
     "theme": "auto",                 # auto | light | dark
     "heartbeat_s": 0.5,              # UI refresh interval
+    "meetings_collapsed": False,     # meetings list folded away
+    "meetings_limit": 25,            # how many rows to show at once (0 = all)
 }
 
 # numeric bounds — a corrupt value is clamped, never fatal.
@@ -50,9 +57,11 @@ _NUM_BOUNDS = {
     "min_speakers": (0, 20),
     "max_speakers": (0, 20),
     "heartbeat_s": (0.1, 5.0),
+    "meetings_limit": (0, 1000),      # 0 = show everything
 }
 _ENUMS = {
     "theme": ("auto", "light", "dark"),
+    "engine": ("local", "cloud"),
 }
 
 
@@ -92,15 +101,36 @@ def _sanitize(cfg: dict) -> dict:
         except (TypeError, ValueError):
             cfg["mic_device"] = None
 
-    for k in ("library", "lang", "model", "hf_token", "live_model"):
+    for k in ("library", "lang", "model", "hf_token", "live_model",
+              "cloud_model", "openai_api_key"):
         if not isinstance(cfg.get(k), str):
             cfg[k] = DEFAULTS[k]
+    cfg["openai_api_key"] = cfg["openai_api_key"].strip()
+    # an unknown cloud model (a typo, or one retired upstream) falls back to the
+    # default rather than failing at upload time
+    import cloud
+    cfg["cloud_model"] = cloud.resolve_model(cfg["cloud_model"])
+    # learned rates: known models only, and only plausible figures — a garbage
+    # value here would put a garbage price in front of the user
+    rates = cfg.get("cloud_rates")
+    clean = {}
+    if isinstance(rates, dict):
+        for k, v in rates.items():
+            try:
+                v = float(v)
+            except (TypeError, ValueError):
+                continue
+            if k in cloud.MODELS and math.isfinite(v) and 0.0001 <= v <= 1.0:
+                clean[k] = round(v, 6)
+    cfg["cloud_rates"] = clean
     cfg["library"] = os.path.expanduser(cfg["library"].strip() or DEFAULTS["library"])
     cfg["lang"] = (cfg["lang"].strip() or DEFAULTS["lang"])[:8]
 
     cfg["auto_transcribe"] = bool(cfg.get("auto_transcribe"))
     cfg["system_capture"] = bool(cfg.get("system_capture"))
     cfg["live_enabled"] = bool(cfg.get("live_enabled"))
+    cfg["cloud_parallel"] = bool(cfg.get("cloud_parallel", True))
+    cfg["meetings_collapsed"] = bool(cfg.get("meetings_collapsed"))
     return cfg
 
 
@@ -150,3 +180,8 @@ def save(cfg: dict) -> None:
 def hf_token(cfg: dict) -> str:
     """Resolve the HuggingFace token: $HF_TOKEN wins, then the stored config value."""
     return (os.environ.get("HF_TOKEN") or cfg.get("hf_token") or "").strip()
+
+
+def openai_key(cfg: dict) -> str:
+    """Resolve the OpenAI key the same way: $OPENAI_API_KEY wins, then config."""
+    return (os.environ.get("OPENAI_API_KEY") or cfg.get("openai_api_key") or "").strip()

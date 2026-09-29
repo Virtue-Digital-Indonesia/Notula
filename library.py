@@ -40,6 +40,7 @@ TRANSCRIPT_JSON = "transcript.json"
 TRANSCRIPT_TXT = "transcript.txt"
 TRANSCRIPT_MERGED = "transcript.merged.txt"
 LIVE = "live.txt"                # the rolling preview, kept as a fallback
+CLOUD_PARTS = ".cloud-parts"     # finished cloud parts of an interrupted run (see cloud.py)
 
 
 def _slug(name: str) -> str:
@@ -220,11 +221,16 @@ def rename_meeting(root: str, mid: str, name: str, move: bool = True) -> str:
     return new_mid
 
 
-def _fmt_duration(sec) -> str:
+def _seconds(sec) -> float:
     try:
-        sec = int(float(sec))
+        v = float(sec)
+        return v if v > 0 else 0.0
     except (TypeError, ValueError):
-        sec = 0
+        return 0.0
+
+
+def _fmt_duration(sec) -> str:
+    sec = int(_seconds(sec))
     m, s = divmod(sec, 60)
     h, m = divmod(m, 60)
     return f"{h:d}:{m:02d}:{s:02d}" if h else f"{m:d}:{s:02d}"
@@ -238,6 +244,51 @@ def _fmt_created(iso: str) -> str:
         return iso or ""
 
 
+def created_ts(mid: str, iso: str) -> float:
+    """Epoch seconds for the meeting, for sorting and date filtering.
+
+    `created` is formatted for display ("Aug 12, 14:30"), which the page can't
+    compare against anything. The id's own timestamp prefix is the fallback, and
+    it is always present because create_meeting builds the id from it.
+    """
+    try:
+        return datetime.fromisoformat(iso).timestamp()
+    except (TypeError, ValueError):
+        pass
+    m = _ID_STAMP.match(mid or "")
+    if m:
+        try:
+            return datetime.strptime(m.group(1), "%Y-%m-%d_%H%M").timestamp()
+        except ValueError:
+            pass
+    return 0.0
+
+
+def cloud_resume(meeting_dir: str) -> dict | None:
+    """What an interrupted cloud run left behind: its model, language and part
+    length, and how many seconds of audio are already transcribed and saved.
+
+    Totalled from the part file names (their spans, in ms), so listing the
+    library never opens them.
+    """
+    d = os.path.join(meeting_dir, CLOUD_PARTS)
+    try:
+        with open(os.path.join(d, "manifest.json"), encoding="utf-8") as fh:
+            info = json.load(fh)
+        names = os.listdir(d)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(info, dict):
+        return None
+    done = 0.0
+    for name in names:
+        m = re.match(r"^part-(\d+)-(\d+)\.json$", name)
+        if m:
+            done += max(0, int(m.group(2)) - int(m.group(1))) / 1000.0
+    return {"model": info.get("model"), "lang": info.get("lang"),
+            "chunk_s": info.get("chunk_s"), "done_s": done}
+
+
 def describe(root: str, mid: str) -> dict:
     """A UI-ready summary of one meeting."""
     meta = read_meta(root, mid)
@@ -245,12 +296,21 @@ def describe(root: str, mid: str) -> dict:
         "id": mid,
         "name": meta.get("name") or mid,
         "created": _fmt_created(meta.get("created", "")),
+        "ts": created_ts(mid, meta.get("created", "")),
         "duration": _fmt_duration(meta.get("duration", 0)),
+        # raw seconds too: the page prices a cloud transcription before it starts
+        "seconds": _seconds(meta.get("duration", 0)),
         "status": meta.get("status", RECORDED),
         "diarized": bool(meta.get("diarized")),
         "warning": meta.get("warning"),
         "hasOutput": os.path.exists(output_path(root, mid)),
         "hasAudio": os.path.exists(audio_path(root, mid)),
+        # how the last transcription was made, and what it cost if it was billed
+        "engine": meta.get("engine") or "",
+        "model": meta.get("model") or "",
+        "cost_usd": meta.get("cost_usd"),
+        # parts a failed cloud run already paid for, which a retry reuses
+        "cloud_resume": cloud_resume(folder(root, mid)),
     }
 
 

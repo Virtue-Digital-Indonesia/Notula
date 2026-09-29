@@ -14,7 +14,7 @@ Deliberately importable on its own: setup.py and the build scripts read it
 without dragging in numpy, sounddevice or pyobjc.
 """
 
-VERSION = "2.0.0-beta2"
+VERSION = "2.0.0-beta3"
 VERSION_SHORT = "2.0.0"     # numeric only, for Info.plist
 
 # 2.0 because this is the release that made Notula cross-platform: a second
@@ -26,7 +26,14 @@ VERSION_SHORT = "2.0.0"     # numeric only, for Info.plist
 # so transcription failed with nothing but "whisper-cli failed" and re-running
 # setup skipped the broken file forever.
 #
-# Still beta: the Windows half has not yet recorded a real meeting.
+# beta3 adds a second transcription engine: OpenAI's gpt-4o-transcribe-diarize
+# (speaker labels) and gpt-transcribe (plain) through the audio API, with the
+# estimated price and time shown before the upload. Parts are streamed and run
+# four at a time, and a failed run keeps its finished parts for the retry. The meetings list also remembers how
+# it was left (folded, row count).
+#
+# Still beta: the Windows half has not yet recorded a real meeting, and the
+# cloud engine has been exercised against a stub of the API, not the real one.
 
 if __name__ == "__main__":
     import sys
