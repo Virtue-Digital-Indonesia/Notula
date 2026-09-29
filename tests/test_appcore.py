@@ -21,7 +21,56 @@ os.environ["NOTULA_THEME"] = "dark"          # deterministic, no host theme call
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import json                              # noqa: E402
-import appcore, config, library          # noqa: E402
+import appcore, config, library, recorder  # noqa: E402
+
+
+class NoDeviceEngine:
+    """Stands in for recorder.RecordingEngine for the whole suite.
+
+    The suite dispatches startRecording. With the microphone and Screen
+    Recording granted to the terminal — normal on a dev machine — the real
+    engine captured the mic and computer audio through ScreenCaptureKit, and a
+    later test swapped in a fake without stopping it. macOS then showed the
+    terminal as "Currently Sharing" long after the run had ended. Nothing here
+    may open a real device; this records that it was asked to, and no more.
+    """
+    created = []
+
+    def __init__(self, specs, folder, write=True):
+        self.specs, self.folder, self.write = specs, folder, write
+        self.running, self.paused, self.elapsed = False, False, 0.0
+        NoDeviceEngine.created.append(self)
+
+    def start(self):
+        self.running = True
+
+    def wait_until_started(self, timeout=None):
+        return True
+
+    def stop(self):
+        self.running = False
+        return os.path.join(self.folder, "audio.wav")
+
+    def stop_streams(self):
+        self.running = False
+
+    def levels(self):
+        return {}
+
+    def set_mute(self, kind, muted):
+        pass
+
+    def set_paused(self, paused):
+        self.paused = paused
+
+    def set_tap(self, fn):
+        pass
+
+    def relocate(self, folder):
+        self.folder = folder
+
+
+recorder.RecordingEngine = NoDeviceEngine
 
 fail = []
 
@@ -488,6 +537,9 @@ check("failed meta write still clears the recorder",
 check("failed meta write is reported to the user",
       any("couldn't be written" in t for t in host.toasts), host.toasts[-1])
 core.dispatch({"action": "startRecording", "name": "x"})   # would no-op if wedged
+check("recording in this suite never opens a real device",
+      NoDeviceEngine.created and all(isinstance(e, NoDeviceEngine) for e in NoDeviceEngine.created)
+      and isinstance(core.rec, NoDeviceEngine), type(core.rec).__name__)
 check("recorder is usable again after the failure", core.tx_mid is None)
 
 # ---- rename during recording, when the folder can't move ------------------------
