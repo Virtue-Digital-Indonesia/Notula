@@ -290,6 +290,13 @@ reopen Notula** — macOS only activates that permission on a relaunch. After th
 it stops asking and computer-audio capture works. (None of this applies on
 Windows: there's no signing, and loopback capture needs no permission.)
 
+It also asks for one credential for speaker labels: **a HuggingFace token or an
+OpenAI key — either is enough**, and it asks only when neither is set. One
+field takes both; Notula tells them apart by their prefix (`hf_…`, `sk-…`). An
+OpenAI key with no HuggingFace token makes OpenAI the default engine, since
+that's then the only way to get speaker labels. *Not now* still gives plain
+transcripts.
+
 ## Output
 
 Each meeting folder (`~/Documents/Notula/<date>_<name>/`, or
@@ -317,13 +324,15 @@ Stored privately in `~/.config/notula/notula.json` (owner-only), or
 
 - **Language** — whisper code (`id`, `en`, …)
 - **Min/Max speakers** — `0` = auto-detect
-- **HuggingFace token** — needed for pyannote diarization. Also read from
-  `$HF_TOKEN` if set. Without it, meetings still transcribe (plain text only).
+- **HuggingFace token** — speaker labels on this computer (pyannote). Also
+  read from `$HF_TOKEN`. Not needed if you have an OpenAI key; with neither,
+  meetings still transcribe, as plain text.
 - **Live transcript** — on/off and which model; see *What it does*
 - **Transcription engine** — *On this computer* or *OpenAI cloud*; the default
   for the dialog and for automatic transcription. Overridable per meeting.
-- **OpenAI model** and **OpenAI API key** — for the cloud engine. The key is
-  also read from `$OPENAI_API_KEY`. See *Cloud transcription*.
+- **OpenAI model** and **OpenAI API key** — for the cloud engine, which labels
+  speakers too, so the key alone is enough. Also read from `$OPENAI_API_KEY`.
+  See *Cloud transcription*.
 - **Library folder** — where meeting folders are created
 
 ## The two audio sources

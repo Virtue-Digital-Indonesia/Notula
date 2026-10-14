@@ -523,7 +523,7 @@ a{color:var(--link);}
       <div class="f full">
         <label>HuggingFace token <span id="hf_tag" class="tag" style="margin-left:6px;">—</span></label>
         <div class="inp"><input id="hf_token" type="password" placeholder="hf_… (for speaker diarization)" onchange="post('setToken',{value:this.value})"></div>
-        <span class="help">Stored privately in your config. Without it, transcripts have no speaker labels.</span>
+        <span class="help">For speaker labels on this computer. Not needed if you use an OpenAI key instead; either one is enough. Stored privately in your config.</span>
       </div>
       <div class="f full">
         <label>Transcription engine</label>
@@ -541,7 +541,7 @@ a{color:var(--link);}
       <div class="f full">
         <label>OpenAI API key <span id="oa_tag" class="tag" style="margin-left:6px;">—</span></label>
         <div class="inp"><input id="openai_key" type="password" placeholder="sk-… (for the cloud engine)" onchange="post('setOpenAIKey',{value:this.value})"></div>
-        <span class="help" id="oa_help">Stored privately in your config, like the HuggingFace token; $OPENAI_API_KEY is used if set. Create one at platform.openai.com/api-keys. Usage is billed to that account.</span>
+        <span class="help" id="oa_help">For the cloud engine, which labels speakers too. Not needed if you have a HuggingFace token; either one is enough. Stored privately in your config; $OPENAI_API_KEY is used if set. Create one at platform.openai.com/api-keys. Usage is billed to that account.</span>
       </div>
       <div class="f full">
         <label>Library folder</label>
@@ -896,7 +896,9 @@ window.notulaInit = function(c){
   if($('auto_tx')) $('auto_tx').checked = !!s.auto_transcribe;
   if($('library')) $('library').value = s.library||'';
   if($('hf_token')){ $('hf_token').value=''; $('hf_token').placeholder = s.hf_ok ? '•••••••• saved — paste a new token to replace' : 'hf_… (for speaker diarization)'; }
-  setTag($('hf_tag'), s.hf_ok?'set':'not set', s.hf_ok?'ok':'warn');
+  /* either credential gives speaker labels, so the missing one is only a
+     warning while the other is missing too */
+  setTag($('hf_tag'), s.hf_ok?'set':(s.openai_ok?'optional':'not set'), s.hf_ok?'ok':(s.openai_ok?'':'warn'));
   window.TXDEFAULTS = {lang: s.lang||'id', min: (s.min_speakers||0), max: (s.max_speakers||0), hf_ok: !!s.hf_ok,
                        engine: s.engine||'local', cloud_model: s.cloud_model||'',
                        cloud_parallel: (s.cloud_parallel!==false)};
@@ -907,7 +909,7 @@ window.notulaInit = function(c){
   fillSelect('tx_cloud_model', opts, s.cloud_model);
   if($('engine')) $('engine').value = s.engine||'local';
   if($('openai_key')){ $('openai_key').value=''; $('openai_key').placeholder = s.openai_ok ? '•••••••• saved — paste a new key to replace' : 'sk-… (for the cloud engine)'; }
-  setTag($('oa_tag'), s.openai_ok?'set':'not set', s.openai_ok?'ok':'warn');
+  setTag($('oa_tag'), s.openai_ok?'set':(s.hf_ok?'optional':'not set'), s.openai_ok?'ok':(s.hf_ok?'':'warn'));
   updateCloudNote();
 
   var inputs = c.inputs||[];

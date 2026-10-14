@@ -145,7 +145,7 @@ check("second on_closing allows it", host.on_closing() is True and core.torn == 
 
 
 # ---- regression: the startup token prompt must not block the dispatch thread ----
-# This is what froze the first real Windows run: prompt_hf_token opened a modal
+# This is what froze the first real Windows run: the token prompt opened a modal
 # tkinter dialog on the dispatch thread, behind the WebView2 window. The UI stayed
 # up but every queued message — including the window's own close — sat behind an
 # invisible dialog. It must hand the dialog to another thread and report back.
@@ -156,13 +156,13 @@ host.start_threads()
 
 dialog_open = threading.Event()
 release = threading.Event()
-host._token_dialog = lambda: (dialog_open.set(), release.wait(5), "hf_tok")[-1]
+host._credential_dialog = lambda: (dialog_open.set(), release.wait(5), "hf_tok")[-1]
 
 got = []
 t0 = time.perf_counter()
-host.prompt_hf_token(lambda tok: got.append((tok, threading.current_thread().name)))
+host.prompt_credential(lambda tok: got.append((tok, threading.current_thread().name)))
 returned_in = time.perf_counter() - t0
-check("prompt_hf_token returns immediately", returned_in < 0.5, f"{returned_in:.3f}s")
+check("prompt_credential returns immediately", returned_in < 0.5, f"{returned_in:.3f}s")
 check("the dialog actually opened", dialog_open.wait(5.0))
 
 progressed = threading.Event()          # the queue must still be draining

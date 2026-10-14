@@ -14,7 +14,7 @@ Deliberately importable on its own: setup.py and the build scripts read it
 without dragging in numpy, sounddevice or pyobjc.
 """
 
-VERSION = "2.0.0-beta3"
+VERSION = "2.0.0-beta4"
 VERSION_SHORT = "2.0.0"     # numeric only, for Info.plist
 
 # 2.0 because this is the release that made Notula cross-platform: a second
@@ -31,6 +31,11 @@ VERSION_SHORT = "2.0.0"     # numeric only, for Info.plist
 # estimated price and time shown before the upload. Parts are streamed and run
 # four at a time, and a failed run keeps its finished parts for the retry. The meetings list also remembers how
 # it was left (folded, row count).
+#
+# beta4: speaker labels need a HuggingFace token *or* an OpenAI key, and the
+# launch prompt now takes either and asks only when neither is set. beta3 asked
+# for the HuggingFace token on every launch, even for someone transcribing with
+# OpenAI, which made both look required.
 #
 # Still beta: the Windows half has not yet recorded a real meeting, and the
 # cloud engine has been exercised against a stub of the API, not the real one.

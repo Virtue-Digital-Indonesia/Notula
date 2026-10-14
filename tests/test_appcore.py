@@ -121,8 +121,9 @@ class StubHost:
     def alert(self, title, body):
         self.alerts.append((title, body))
 
-    def prompt_hf_token(self, callback):
+    def prompt_credential(self, callback):
         # asynchronous by contract; answering inline is allowed (macOS does)
+        self.prompted = getattr(self, "prompted", 0) + 1
         callback(self.token)
 
     # callback-based by contract, so a host is free to run the dialog off-thread
@@ -171,6 +172,55 @@ check("init platform strings non-empty", bool(init["system_desc"]), init["system
 # the HF prompt fires when no token is stored, and the answer is saved
 check("hf token prompted + saved", core.cfg["hf_token"] == "hf_stub_token",
       repr(core.cfg["hf_token"])[:20])
+
+# ---- either credential is enough; neither is required ---------------------------
+os.environ.pop("HF_TOKEN", None)
+os.environ.pop("OPENAI_API_KEY", None)
+check("the launch prompt asked once", getattr(host, "prompted", 0) == 1, getattr(host, "prompted", 0))
+base_cfg = dict(core.cfg)
+check("no prompt with only a HuggingFace token",
+      not appcore.needs_credential(dict(base_cfg, hf_token="hf_x", openai_api_key="")))
+check("no prompt with only an OpenAI key",
+      not appcore.needs_credential(dict(base_cfg, hf_token="", openai_api_key="sk-x")))
+check("a prompt only with neither",
+      appcore.needs_credential(dict(base_cfg, hf_token="", openai_api_key="")))
+check("the prefixes tell the two apart",
+      appcore.credential_kind(" hf_abc ") == "hf" and appcore.credential_kind("sk-proj-abc") == "openai"
+      and appcore.credential_kind("abc") is None and appcore.credential_kind("") is None)
+
+kept = {k: core.cfg[k] for k in ("hf_token", "openai_api_key", "engine")}
+asked = host.prompted
+core.cfg.update(hf_token="", openai_api_key="sk-only")
+core._startup_permissions()
+check("launching with only an OpenAI key doesn't ask for a HuggingFace token",
+      host.prompted == asked, host.prompted)
+
+core.cfg.update(hf_token="", openai_api_key="", engine="local")
+core._credential_result(" sk-proj-test ")
+check("an OpenAI key typed at the prompt is saved as the OpenAI key",
+      core.cfg["openai_api_key"] == "sk-proj-test" and core.cfg["hf_token"] == "")
+check("...and makes OpenAI the default, the only engine that can label speakers here",
+      core.cfg["engine"] == "cloud" and "defaults to OpenAI" in host.toasts[-1], host.toasts[-1])
+check("...and the key itself never reaches the page",
+      "sk-proj-test" not in json.dumps([a for f, a in host.js_calls if f == "notulaInit"][-1]))
+core.cfg.update(hf_token="hf_have", openai_api_key="", engine="local")
+core._credential_result("sk-other")
+check("with a HuggingFace token already, an OpenAI key leaves the engine alone",
+      core.cfg["engine"] == "local" and core.cfg["openai_api_key"] == "sk-other")
+core.cfg.update(hf_token="", openai_api_key="")
+core._credential_result("hf_new")
+check("a HuggingFace token typed at the prompt is saved as such",
+      core.cfg["hf_token"] == "hf_new" and core.cfg["openai_api_key"] == "")
+core.cfg.update(hf_token="", openai_api_key="")
+core._credential_result("not-a-key")
+check("anything else is refused, and nothing is saved",
+      core.cfg["hf_token"] == "" and core.cfg["openai_api_key"] == ""
+      and "isn't a HuggingFace token" in host.toasts[-1], host.toasts[-1])
+core._credential_result(None)
+check("Not now says either one will do", "HuggingFace token or an OpenAI key" in host.toasts[-1],
+      host.toasts[-1])
+core.cfg.update(kept)
+config.save(core.cfg)
 
 st = next(a[0] for f, a in host.js_calls if f == "notulaState")
 check("state has header/canRecord", "header" in st and "canRecord" in st, st["header"])

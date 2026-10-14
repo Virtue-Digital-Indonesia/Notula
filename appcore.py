@@ -44,17 +44,44 @@ import version
 HF_MODEL_URL = "https://huggingface.co/pyannote/speaker-diarization-community-1"
 HF_TOKENS_URL = "https://huggingface.co/settings/tokens"
 
-HF_PROMPT_TITLE = "Enable speaker labels (diarization)"
-HF_PROMPT_BODY = (
-    "To label who is speaking, Notula uses the pyannote model, which is "
-    "free but gated — you must do this once:\n\n"
-    "1.  Open the model page and click Agree/Accept its terms:\n"
+OPENAI_KEYS_URL = cloud.KEYS_URL
+
+# The launch prompt. Speaker labels come from either credential, so either one
+# satisfies it: a HuggingFace token for pyannote on this machine, or an OpenAI
+# key for the cloud engine. One field takes both; credential_kind() tells them
+# apart by prefix, so neither platform's dialog needs a second field.
+CREDENTIAL_PROMPT_TITLE = "Turn on speaker labels"
+CREDENTIAL_PROMPT_BODY = (
+    "Notula labels who is speaking in one of two ways. Either one is enough.\n\n"
+    "A HuggingFace token (free): speaker labels on this computer. Accept the "
+    "model's terms once, then create a Read token:\n"
     f"      {HF_MODEL_URL}\n"
-    "2.  Create a HuggingFace access token (Read):\n"
-    f"      {HF_TOKENS_URL}\n"
-    "3.  Paste the token below.\n\n"
-    "You can Skip — you'll still get full transcripts, just without "
-    "speaker labels. Add a token later under the ⚙ gear.")
+    f"      {HF_TOKENS_URL}\n\n"
+    "An OpenAI API key: transcribe in the cloud with OpenAI's speaker labels, "
+    f"about ${cloud.MODELS[cloud.DEFAULT_MODEL]['usd_per_min']:.3f} a minute, "
+    "billed to your OpenAI account:\n"
+    f"      {OPENAI_KEYS_URL}\n\n"
+    "Paste either one below. You can add the other later under the ⚙ gear. "
+    "Not now still gives you full transcripts, just without speaker labels.")
+CREDENTIAL_PLACEHOLDER = "hf_… or sk-…"
+
+
+def needs_credential(cfg) -> bool:
+    """Whether to ask at launch: only when there is no way to get speaker
+    labels at all. Either credential is enough; neither is required."""
+    return not (config.hf_token(cfg) or config.openai_key(cfg))
+
+
+def credential_kind(value) -> str | None:
+    """Which credential a pasted string is: 'hf' for a HuggingFace token,
+    'openai' for an OpenAI key, None for neither. Both services publish their
+    prefixes (hf_, sk-), so there is nothing to guess."""
+    value = (value or "").strip()
+    if value.startswith("hf_"):
+        return "hf"
+    if value.startswith("sk-"):
+        return "openai"
+    return None
 
 # What ffmpeg is allowed to be pointed at on import. Also a guard: AppKit hands
 # the script path to application:openFiles: when the app is run from source, so
@@ -75,9 +102,10 @@ class Host:
     is_dark()                whether the desktop is currently in dark mode.
     confirm(msg, info)       modal yes/no; True if the user confirmed.
     alert(title, body)       modal message with a single dismiss button.
-    prompt_hf_token(cb)      ask for the token, then call cb(token_or_None) on
+    prompt_credential(cb)    ask for a HuggingFace token or an OpenAI key (one
+                             field takes either), then call cb(text_or_None) on
                              the UI thread. MUST NOT block the caller: it fires
-                             unprompted at startup. Copy: HF_PROMPT_TITLE/BODY.
+                             unprompted at startup. Copy: CREDENTIAL_PROMPT_*.
     pick_media_file(exts,cb) open dialog, then cb(path_or_None) on the UI thread.
     pick_folder(prompt,cb)   folder dialog, then cb(path_or_None) on the UI thread.
                              Both MUST NOT block the caller, for the same reason
@@ -484,13 +512,15 @@ class AppCore:
             self._toast(f"Allow Notula in {permissions.SCREEN_SETTINGS_PATH} to "
                         f"capture computer audio, then relaunch.", "warn")
 
-        # HuggingFace token — needed for speaker diarization; prompt if missing.
-        if not config.hf_token(self.cfg):
-            self._prompt_hf_token()
+        # Speaker labels need a HuggingFace token (local) or an OpenAI key
+        # (cloud). Either is enough, so ask only when neither is set.
+        if needs_credential(self.cfg):
+            self._prompt_credential()
 
-    def _prompt_hf_token(self):
-        """Launch-time prompt for the HuggingFace token. Skippable — transcripts
-        still work without it, just with no speaker labels.
+    def _prompt_credential(self):
+        """Launch-time prompt for a HuggingFace token or an OpenAI key.
+        Skippable — transcripts still work without either, just with no
+        speaker labels.
 
         Asynchronous by contract. This is the one dialog the app opens *by
         itself*, with no user gesture behind it, so it must never block the
@@ -499,19 +529,40 @@ class AppCore:
         dialog the user may not even be able to see.
         """
         try:
-            self.host.prompt_hf_token(self._hf_token_result)
+            self.host.prompt_credential(self._credential_result)
         except Exception:
-            self._hf_token_result(None)
+            self._credential_result(None)
 
-    def _hf_token_result(self, tok):        # UI thread
-        if tok:
-            self.cfg["hf_token"] = tok.strip()
+    def _credential_result(self, value):     # UI thread
+        value = (value or "").strip()
+        if not value:
+            self._toast("Not now — transcripts won't have speaker labels until "
+                        "you add a HuggingFace token or an OpenAI key (⚙).", "warn")
+            return
+        kind = credential_kind(value)
+        if kind == "hf":
+            self.cfg["hf_token"] = value
             config.save(self.cfg)
             self._push_init()
-            self._toast("Token saved — speaker labels enabled ✓", "ok")
+            self._toast("HuggingFace token saved — speaker labels on this "
+                        "computer ✓", "ok")
+        elif kind == "openai":
+            self.cfg["openai_api_key"] = value
+            # With no HuggingFace token, the cloud is the only engine that can
+            # label speakers, so make it the dialog's default. The dialog still
+            # shows the price before every run.
+            switched = not config.hf_token(self.cfg)
+            if switched:
+                self.cfg["engine"] = "cloud"
+            config.save(self.cfg)
+            self._push_init()
+            self._toast("OpenAI key saved — " + (
+                "transcribing defaults to OpenAI, with speaker labels. Switch "
+                "per meeting in the Transcribe dialog ✓" if switched
+                else "the cloud engine is ready ✓"), "ok")
         else:
-            self._toast("Skipped — transcripts won't have speaker labels "
-                        "until you add a HuggingFace token (⚙).", "warn")
+            self._toast("That isn't a HuggingFace token (hf_…) or an OpenAI key "
+                        "(sk-…). Nothing was saved; add one under ⚙.", "err")
 
     def _after_startup_mic(self, granted):
         if granted:

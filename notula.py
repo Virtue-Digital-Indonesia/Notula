@@ -138,39 +138,44 @@ class Bridge(NSObject):
         a.runModal()
 
     @objc.python_method
-    def prompt_hf_token(self, callback):
-        """Token prompt with a third button that opens the two pages you need
-        first, then re-asks — the terms have to be accepted before a token works.
+    def prompt_credential(self, callback):
+        """One field for a HuggingFace token or an OpenAI key (appcore tells
+        them apart), with buttons that open the pages for getting either, then
+        re-ask — the HuggingFace terms have to be accepted before a token works.
 
         Runs modally on the main thread, which is safe here: NSAlert.runModal
         keeps the run loop pumping, so the rest of the app stays alive. The
         callback is invoked before returning."""
-        callback(self._run_hf_prompt())
+        callback(self._run_credential_prompt())
 
     @objc.python_method
-    def _run_hf_prompt(self):
+    def _run_credential_prompt(self):
         while True:
             alert = NSAlert.alloc().init()
-            alert.setMessageText_(appcore.HF_PROMPT_TITLE)
-            alert.setInformativeText_(appcore.HF_PROMPT_BODY)
+            alert.setMessageText_(appcore.CREDENTIAL_PROMPT_TITLE)
+            alert.setInformativeText_(appcore.CREDENTIAL_PROMPT_BODY)
             field = NSSecureTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 340, 24))
-            field.setPlaceholderString_("hf_…")
+            field.setPlaceholderString_(appcore.CREDENTIAL_PLACEHOLDER)
             alert.setAccessoryView_(field)
-            alert.addButtonWithTitle_("Save & enable")
-            alert.addButtonWithTitle_("Open HuggingFace…")
-            alert.addButtonWithTitle_("Skip")
+            alert.addButtonWithTitle_("Save")
+            alert.addButtonWithTitle_("Get a HuggingFace token…")
+            alert.addButtonWithTitle_("Get an OpenAI key…")
+            alert.addButtonWithTitle_("Not now")
             try:
                 alert.window().setInitialFirstResponder_(field)
             except Exception:
                 pass
             resp = alert.runModal()
-            if resp == 1000:                      # Save & enable
+            if resp == 1000:                      # Save
                 return str(field.stringValue()).strip() or None
-            if resp == 1001:                      # Open HuggingFace, then re-ask
+            if resp == 1001:                      # HuggingFace pages, then re-ask
                 osutil.open_url(appcore.HF_MODEL_URL)
                 osutil.open_url(appcore.HF_TOKENS_URL)
                 continue
-            return None                           # Skip
+            if resp == 1002:                      # OpenAI keys page, then re-ask
+                osutil.open_url(appcore.OPENAI_KEYS_URL)
+                continue
+            return None                           # Not now
 
     # Both answer via callback (see appcore.Host). Running the panel inline is
     # safe here — NSOpenPanel.runModal keeps the run loop pumping, so the app

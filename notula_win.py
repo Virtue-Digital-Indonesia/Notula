@@ -341,8 +341,9 @@ class WinHost:
         MB_OK, MB_ICONINFORMATION = 0x0, 0x40
         self._message_box(body, title, MB_OK | MB_ICONINFORMATION)
 
-    def prompt_hf_token(self, callback):
-        """Ask for the token on a thread of its own, then report back.
+    def prompt_credential(self, callback):
+        """Ask for a HuggingFace token or an OpenAI key on a thread of its
+        own, then report back.
 
         Emphatically NOT on the dispatch thread. This dialog opens by itself the
         first time the app runs, and a modal dialog there blocks every queued
@@ -353,28 +354,29 @@ class WinHost:
         def worker():
             tok = None
             try:
-                tok = self._token_dialog()
+                tok = self._credential_dialog()
             except Exception:
                 traceback.print_exc()
             self.on_main(callback, tok)
 
         threading.Thread(target=worker, name="notula-token", daemon=True).start()
 
-    def _token_dialog(self):
-        """The dialog itself, with a button that opens the two pages you need
-        first. Unlike the macOS sheet it doesn't have to re-ask - it stays up
-        while you go and accept the model terms. Returns the token, or None."""
+    def _credential_dialog(self):
+        """The dialog itself: one field for either credential, with buttons
+        that open the pages for getting each. Unlike the macOS sheet it doesn't
+        have to re-ask - it stays up while you go and get one. Returns what was
+        typed, or None."""
         import tkinter as tk
         result = {"token": None}
         with _Tk() as root:
             dlg = tk.Toplevel(root)
-            dlg.title(appcore.HF_PROMPT_TITLE)
+            dlg.title(appcore.CREDENTIAL_PROMPT_TITLE)
             dlg.resizable(False, False)
             frame = tk.Frame(dlg, padx=16, pady=14)
             frame.pack(fill="both", expand=True)
-            tk.Label(frame, text=appcore.HF_PROMPT_TITLE,
+            tk.Label(frame, text=appcore.CREDENTIAL_PROMPT_TITLE,
                      font=("Segoe UI", 11, "bold"), anchor="w").pack(fill="x")
-            tk.Label(frame, text=appcore.HF_PROMPT_BODY, justify="left",
+            tk.Label(frame, text=appcore.CREDENTIAL_PROMPT_BODY, justify="left",
                      wraplength=470, anchor="w").pack(fill="x", pady=(8, 10))
             entry = tk.Entry(frame, show="•", width=52)
             entry.pack(fill="x")
@@ -388,11 +390,15 @@ class WinHost:
                 osutil.open_url(appcore.HF_MODEL_URL)
                 osutil.open_url(appcore.HF_TOKENS_URL)
 
+            def open_openai():
+                osutil.open_url(appcore.OPENAI_KEYS_URL)
+
             btns = tk.Frame(frame)
             btns.pack(fill="x", pady=(12, 0))
-            tk.Button(btns, text="Skip", width=10, command=dlg.destroy).pack(side="right")
-            tk.Button(btns, text="Open HuggingFace…", command=open_hf).pack(side="right", padx=6)
-            tk.Button(btns, text="Save & enable", width=14, command=save).pack(side="right")
+            tk.Button(btns, text="Not now", width=10, command=dlg.destroy).pack(side="right")
+            tk.Button(btns, text="Get an OpenAI key…", command=open_openai).pack(side="right", padx=6)
+            tk.Button(btns, text="Get a HuggingFace token…", command=open_hf).pack(side="right")
+            tk.Button(btns, text="Save", width=10, command=save).pack(side="right", padx=(0, 6))
             dlg.bind("<Return>", lambda _e: save())
             dlg.bind("<Escape>", lambda _e: dlg.destroy())
             dlg.protocol("WM_DELETE_WINDOW", dlg.destroy)
