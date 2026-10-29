@@ -27,10 +27,10 @@ button and a library in front of it.
 ## What it does
 
 1. **Record** — captures your **microphone** and (optionally) **computer audio**
-   as two independent sources straight to a 16 kHz mono WAV (whisper-native, no
-   conversion step). Each source has a **live waveform + level meter** so you can
-   see it's capturing, and a **Mute** button you can toggle mid-meeting. Manual
-   start/stop, live timer. Multiple sources are mixed on stop.
+   as two independent sources, 16 kHz mono. Each source has a **live waveform +
+   level meter** so you can see it's capturing, and a **Mute** button you can
+   toggle mid-meeting. Manual start/stop, live timer. Multiple sources are mixed
+   on stop and saved as **FLAC**: lossless, about half the size of WAV.
    **Test input** previews the meters live without recording.
    **Pause** drops audio at the capture callback, so paused time never reaches
    the file and the timer freezes with it — as opposed to **Mute**, which
@@ -304,7 +304,8 @@ Each meeting folder (`~/Documents/Notula/<date>_<name>/`, or
 
 | file | what |
 |---|---|
-| `audio.wav` | the recording (16 kHz mono) |
+| `audio.flac` | the recording, 16 kHz mono (`audio.wav` in meetings made before FLAC) |
+| `src_mic.flac`, `src_system.flac` | each source before mixing, kept in case the mix needs redoing |
 | `meta.json` | name, timestamps, device, status, duration |
 | `transcript.json` | whisper raw output |
 | `transcript.txt` | plain transcript |
@@ -352,7 +353,24 @@ Stored privately in `~/.config/notula/notula.json` (owner-only), or
   playback device, so if you switch output mid-meeting, restart the recording.
 
 Each source has its own **live waveform + level meter** and **Mute** button. The
-two are recorded to separate WAVs and mixed to `audio.wav` on stop.
+two are recorded to separate WAVs, mixed to `audio.flac` on stop, and then
+stored as FLAC themselves.
+
+### Storage
+
+New recordings are FLAC, which is lossless: it decodes to exactly the samples
+that were recorded, so transcripts don't change. It takes 30–55% of the space
+of WAV on real meetings (a silent track takes almost nothing), roughly 60 MB
+per hour for the mix.
+
+Meetings recorded before that are still WAV. **⚙ → Recordings → Compress**
+converts them. Each FLAC is decoded and checked against its WAV, sample for
+sample, before the WAV is deleted; if anything doesn't match, the WAV stays.
+Meetings that are recording, importing or transcribing are skipped.
+
+Notula also reads `audio.m4a`, `audio.mp3`, `audio.ogg` and `audio.opus`, so a
+library you compressed with another tool still transcribes. Those formats are
+lossy, and Notula never writes them.
 
 ### Permissions, in short
 

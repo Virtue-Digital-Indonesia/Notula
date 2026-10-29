@@ -393,6 +393,8 @@ class AppCore:
         self._tx_progress = None
         self._tx_proc = None
         self._tx_cancel = None        # set on quit, so a cloud run stops at its next event
+        self._compress = None         # Settings → Compress while it runs: {done, total}
+        self._compressing = set()     # ...and the meetings it's working through
         self._tick_count = 0
         self._last_dark = None
         self._torn = False
@@ -669,6 +671,7 @@ class AppCore:
                 "model": self.cfg.get("live_model") or live.DEFAULT_MODEL,
             },
             "progress": self._tx_progress,
+            "compress": self._compress,
             "header": header,
             "recTag": rec_tag,
             "recTagKind": rec_kind,
@@ -749,6 +752,8 @@ class AppCore:
             self._set_library(str(body.get("value") or ""))
         elif action == "openLibrary":
             self._open_path(self.cfg["library"])
+        elif action == "compressAudio":
+            self._compress_audio()
         elif action == "refresh":
             self._scan_devices()
             self._push_init()
@@ -892,6 +897,12 @@ class AppCore:
             duration = pipeline.probe_duration(pipeline.Path(final)) or rec.elapsed
         else:
             duration = rec.elapsed
+        # the source tracks are kept beside the mix; store them as FLAC too
+        for wav in library.wav_files(rec.folder):
+            try:
+                pipeline.compress_wav(wav)
+            except (pipeline.PipelineError, OSError):
+                pass          # the WAV stays, and Settings offers it again
         self.host.on_main(self._on_stopped, mid, duration)
 
     def _on_stopped(self, mid, duration):
@@ -1149,9 +1160,9 @@ class AppCore:
         threading.Thread(target=self._do_import, args=(mid, path), daemon=True).start()
 
     def _do_import(self, mid, path):
-        wav = library.audio_path(self.cfg["library"], mid)
-        ok, err = pipeline.convert_to_wav(path, wav)
-        dur = pipeline.probe_duration(pipeline.Path(wav)) if ok and os.path.exists(wav) else 0.0
+        dst = library.audio_path(self.cfg["library"], mid)
+        ok, err = pipeline.convert_audio(path, dst)
+        dur = pipeline.probe_duration(pipeline.Path(dst)) if ok and os.path.exists(dst) else 0.0
         self.host.on_main(self._import_done, mid, ok, dur, err)
 
     def _import_done(self, mid, ok, dur, err):
@@ -1165,11 +1176,67 @@ class AppCore:
             self._toast(f"Import failed: {err}", "err")
         self._push_meetings()
 
+    # ---- compressing older recordings ----
+
+    def _compress_audio(self):
+        """Settings → Compress: every WAV in the library becomes a FLAC of the
+        same samples. New recordings are FLAC already; this is for older ones."""
+        if self._compress is not None:
+            return
+        root = self.cfg["library"]
+        idle = (library.RECORDED, library.TRANSCRIBED, library.ERROR)
+        jobs = [(m["id"], wav) for m in library.list_meetings(root)
+                if m["id"] not in (self.rec_mid, self.tx_mid) and m["status"] in idle
+                for wav in library.wav_files(library.folder(root, m["id"]))]
+        if not jobs:
+            self._toast("Nothing to compress — every recording is already compressed")
+            return
+        self._compressing = {mid for mid, _ in jobs}
+        self._compress = {"done": 0, "total": len(jobs)}
+        self._push_state()
+        threading.Thread(target=self._do_compress, args=(jobs,), daemon=True).start()
+
+    def _do_compress(self, jobs):                 # worker thread
+        freed, failed = 0, []
+        for i, (mid, wav) in enumerate(jobs):
+            try:
+                freed += pipeline.compress_wav(wav)
+            except (pipeline.PipelineError, OSError) as e:
+                failed.append(f"{os.path.basename(wav)} in {mid}: {e}")
+            self.host.on_main(self._compress_progress, i + 1)
+        self.host.on_main(self._compress_done, freed, failed)
+
+    def _compress_progress(self, done):
+        if self._compress is not None:
+            self._compress["done"] = done
+            self._push_state()
+
+    def _compress_done(self, freed, failed):
+        meetings = len(self._compressing)
+        self._compress, self._compressing = None, set()
+        self._push_state()
+        self._push_meetings()
+        mb = freed / 1e6
+        size = (f"{mb / 1000:.1f} GB" if mb >= 1000 else f"{mb:.0f} MB" if mb >= 1
+                else "under 1 MB")
+        if failed:
+            for line in failed:
+                log.warning("compress: %s", line)
+            self._toast(f"Freed {size}, but {len(failed)} file(s) stayed WAV — "
+                        f"first: {failed[0]}", "warn")
+        else:
+            self._toast(f"Compressed {meetings} recording{'s' if meetings != 1 else ''}"
+                        f" · freed {size}, no quality lost", "ok")
+
     # ---- transcription ----
 
     def _transcribe(self, mid, lang=None, min_speakers=None, max_speakers=None,
                     engine=None, cloud_model=None, parallel=None):
         if not mid or self.tx_mid or self.rec is not None:
+            return
+        if mid in self._compressing:
+            self._toast("That recording is being compressed — transcribe it once "
+                        "that finishes.", "warn")
             return
         # per-transcription settings from the dialog also become the saved defaults
         changed = False
@@ -1440,6 +1507,7 @@ class AppCore:
 
         recording = (mid == self.rec_mid and self.rec is not None and not self._stopping)
         if (mid == self.tx_mid or meta.get("status") == library.IMPORTING
+                or mid in self._compressing
                 or (mid == self.rec_mid and not recording)):
             self._toast("That meeting is busy — rename it once it finishes.", "warn")
             self._push_meetings()
@@ -1484,7 +1552,7 @@ class AppCore:
         self._push_meetings()
 
     def _delete(self, mid):
-        if not mid or mid in (self.rec_mid, self.tx_mid):
+        if not mid or mid in (self.rec_mid, self.tx_mid) or mid in self._compressing:
             self._toast("That meeting is busy", "warn")
             return
         folder = library.folder(self.cfg["library"], mid)

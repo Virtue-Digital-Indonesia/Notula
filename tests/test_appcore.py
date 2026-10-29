@@ -620,6 +620,86 @@ moved = [m["id"] for m in [a[0] for f, a in host.js_calls if f == "notulaMeeting
 check("deferred rename applied on stop", any("After" in i for i in moved), moved)
 check("pending rename cleared", core._pending_rename is None)
 
+# ---- Settings → Compress ----------------------------------------------------------
+import pipeline as _plc                          # noqa: E402
+if not os.path.exists(_plc.FFMPEG):
+    print(f"SKIP  compress: ffmpeg not at {_plc.FFMPEG}")
+else:
+    import array, wave as _wave                  # noqa: E401,E402
+    def _wav(p, n=16000):
+        with _wave.open(p, "wb") as w:
+            w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000)
+            w.writeframes(array.array("h", [(i * 37) % 2000 - 1000 for i in range(n)]).tobytes())
+    root = core.cfg["library"]
+    old_mid = library.create_meeting(root, "Old WAV meeting")
+    library.update_meta(root, old_mid, status=library.TRANSCRIBED, duration=1)
+    for nm in ("audio.wav", "src_mic.wav", "src_system.wav"):
+        _wav(library.path(root, old_mid, nm))
+    busy_mid = library.create_meeting(root, "Importing WAV meeting")
+    library.update_meta(root, busy_mid, status=library.IMPORTING)
+    _wav(library.path(root, busy_mid, "audio.wav"))
+    check("the row reports how much is WAV", library.describe(root, old_mid)["wavBytes"] > 90000)
+
+    # while a meeting is being compressed, nothing else may touch its files
+    core._compressing = {old_mid}
+    n = len(host.toasts)
+    core.dispatch({"action": "transcribe", "id": old_mid})
+    check("no transcribing a meeting mid-compress", core.tx_mid is None and "compressed" in host.toasts[-1],
+          host.toasts[n:])
+    core.dispatch({"action": "rename", "id": old_mid, "name": "Moved away"})
+    check("no renaming it either", os.path.isdir(library.folder(root, old_mid)))
+    core.host.confirm_result = True
+    core.dispatch({"action": "delete", "id": old_mid})
+    core.host.confirm_result = False
+    check("or deleting it", os.path.isdir(library.folder(root, old_mid)))
+    core._compressing = set()
+
+    n = len(host.js_calls)
+    core.dispatch({"action": "compressAudio"})
+    import time as _t                            # noqa: E402
+    for _ in range(500):
+        if core._compress is None:
+            break
+        _t.sleep(0.02)
+    states = [a[0] for f, a in host.js_calls[n:] if f == "notulaState"]
+    check("the page is told it's compressing", any(st.get("compress") for st in states))
+    check("...and when it's done", states and states[-1].get("compress") is None)
+    left = sorted(os.listdir(library.folder(root, old_mid)))
+    check("every WAV became FLAC", not [x for x in left if x.endswith(".wav")]
+          and {"audio.flac", "src_mic.flac", "src_system.flac"} <= set(left), left)
+    check("the meeting's recording is now the FLAC", library.audio_path(root, old_mid).endswith("audio.flac"))
+    check("a meeting that's importing is left alone",
+          os.path.exists(library.path(root, busy_mid, "audio.wav")))
+    check("the toast says what it freed",
+          host.toasts[-1].startswith("Compressed 1 recording · freed") and "no quality lost" in host.toasts[-1],
+          host.toasts[-1])
+    library.update_meta(root, busy_mid, status=library.RECORDED)
+    library.update_meta(root, old_mid, status=library.TRANSCRIBED)
+    os.remove(library.path(root, busy_mid, "audio.wav"))
+    core.dispatch({"action": "compressAudio"})
+    check("nothing left to compress says so", "Nothing to compress" in host.toasts[-1], host.toasts[-1])
+
+    # a recording that just stopped: the mix is FLAC already, and the source
+    # tracks follow before the meeting is handed back
+    stop_mid = library.create_meeting(root, "Just stopped")
+    _wav(library.path(root, stop_mid, "src_mic.wav"))
+    _wav(library.path(root, stop_mid, "src_system.wav"))
+    class StoppedEngine(NoDeviceEngine):
+        def stop(self):
+            out = os.path.join(self.folder, "audio.flac")
+            _plc.convert_audio(os.path.join(self.folder, "src_mic.wav"), out)
+            return out
+    real_auto, core.cfg["auto_transcribe"] = core.cfg.get("auto_transcribe"), False
+    core.rec = StoppedEngine([], library.folder(root, stop_mid))
+    core.rec_mid, core._stopping = stop_mid, True
+    core._do_stop(core.rec, stop_mid)
+    core.cfg["auto_transcribe"] = real_auto
+    left = sorted(os.listdir(library.folder(root, stop_mid)))
+    check("a stopped recording keeps its source tracks as FLAC",
+          left == ["audio.flac", "meta.json", "src_mic.flac", "src_system.flac"], left)
+    check("...and is saved", library.read_meta(root, stop_mid)["status"] == library.RECORDED
+          and core.rec is None)
+
 # ---- tick + teardown ------------------------------------------------------------
 before = len(host.js_calls)
 for _ in range(5):

@@ -1,5 +1,5 @@
 """
-notula.pipeline — turn a recorded WAV into a diarized, speaker-labeled transcript.
+notula.pipeline — turn a recording into a diarized, speaker-labeled transcript.
 
 This module is stdlib-only so it can be imported by the app's lightweight pyobjc
 venv (which has no torch/pyannote). It shells out twice:
@@ -17,8 +17,12 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
+import wave
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -135,10 +139,8 @@ class _Mono:
         self.cb(stage, frac, msg)
 
 
-def convert_to_wav(src, dst) -> tuple[bool, str | None]:
-    """Convert any audio/video file to a 16 kHz mono WAV (for imported recordings)."""
-    cmd = [FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-i", str(src),
-           "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", str(dst)]
+def _ffmpeg(*args) -> tuple[bool, str | None]:
+    cmd = [FFMPEG, "-hide_banner", "-loglevel", "error", "-y", *map(str, args)]
     try:
         subprocess.run(cmd, check=True, capture_output=True,
                        **osutil.popen_kwargs(new_group=False))
@@ -146,8 +148,85 @@ def convert_to_wav(src, dst) -> tuple[bool, str | None]:
     except subprocess.CalledProcessError as e:
         err = (e.stderr or b"").decode("utf-8", "replace").strip()
         return False, (err.splitlines()[-1] if err else f"ffmpeg exit {e.returncode}")
+    except FileNotFoundError:
+        # bare, this is "[WinError 2] The system cannot find the file specified"
+        return False, f"ffmpeg not found at {FFMPEG}"
     except OSError as e:
         return False, str(e)
+
+
+def convert_audio(src, dst) -> tuple[bool, str | None]:
+    """Convert any audio/video file to 16 kHz mono: FLAC or WAV, by dst's extension."""
+    codec = "flac" if Path(dst).suffix.lower() == ".flac" else "pcm_s16le"
+    return _ffmpeg("-i", src, "-ar", "16000", "-ac", "1", "-c:a", codec, dst)
+
+
+def _pcm_md5(path) -> str:
+    """MD5 of the decoded samples, which is the same for a WAV and a lossless copy."""
+    out = subprocess.run(
+        [FFMPEG, "-hide_banner", "-v", "error", "-i", str(path),
+         "-map", "0:a:0", "-f", "md5", "-"],
+        capture_output=True, text=True, timeout=600, check=True,
+        **osutil.popen_kwargs(new_group=False)).stdout.strip()
+    if not out.startswith("MD5="):
+        raise ValueError(f"no checksum for {path}")
+    return out
+
+
+def compress_wav(wav) -> int:
+    """Replace a WAV with a FLAC of the same samples. Returns the bytes freed.
+
+    FLAC is lossless, and the WAV is deleted only after the FLAC has been
+    decoded and its samples hash the same. Anything else (no ffmpeg, a full
+    disk, a WAV that isn't 16-bit PCM) raises PipelineError and leaves the WAV
+    as it was.
+    """
+    src = Path(wav)
+    try:
+        with wave.open(str(src), "rb") as w:
+            if w.getsampwidth() != 2:
+                raise PipelineError(f"{src.name} isn't 16-bit PCM")
+    except (wave.Error, EOFError) as e:
+        raise PipelineError(f"{src.name} isn't a readable WAV ({e})")
+    dst = src.with_suffix(".flac")
+    tmp = src.with_name(f".{src.stem}.flac.partial")     # hidden until verified
+    try:
+        ok, err = _ffmpeg("-i", src, "-map", "0:a:0", "-c:a", "flac", "-f", "flac", tmp)
+        if not ok:
+            raise PipelineError(err)
+        try:
+            same = _pcm_md5(src) == _pcm_md5(tmp)
+        except (OSError, ValueError, subprocess.SubprocessError) as e:
+            raise PipelineError(f"could not verify {src.name}: {e}")
+        if not same:
+            raise PipelineError(f"the FLAC of {src.name} didn't match it")
+        os.replace(tmp, dst)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+    freed = src.stat().st_size - dst.stat().st_size
+    src.unlink()
+    return freed
+
+
+@contextmanager
+def as_wav(path):
+    """The recording as a WAV, which is what whisper-cli and the diarizer's
+    soundfile read. A compressed one is decoded to a temporary WAV that lasts
+    as long as the with-block."""
+    src = Path(path)
+    if src.suffix.lower() == ".wav":
+        yield src
+        return
+    tmp = Path(tempfile.mkdtemp(prefix="notula-"))
+    try:
+        wav = tmp / "audio.wav"
+        ok, err = convert_audio(src, wav)
+        if not ok:
+            raise PipelineError(f"could not decode {src.name}: {err}")
+        yield wav
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def probe_duration(wav: Path) -> float:
@@ -255,13 +334,14 @@ def transcribe_meeting(wav_path, out_dir, *, lang="id", min_speakers=None,
                        max_speakers=None, model="large-v3", hf_token=None,
                        diarize=True, strict=False, tx_python=TX_PYTHON,
                        progress_cb: Optional[ProgressCB] = None, on_proc=None) -> dict:
-    """Transcribe (+ diarize) a 16 kHz mono WAV. Blocks; run on a worker thread.
+    """Transcribe (+ diarize) a recording: a 16 kHz mono WAV, or anything ffmpeg
+    reads (FLAC, m4a…), which is decoded first. Blocks; run on a worker thread.
 
     progress_cb(stage, fraction, message) is invoked on the CALLING thread with a
     monotonic 0..1 fraction. on_proc(popen) is called with each spawned child so
     the caller can kill it on quit. Returns output paths + a `diarized` flag.
     """
-    wav = Path(wav_path)
+    src = Path(wav_path)
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     emit = _Mono(progress_cb or _noop)
@@ -273,8 +353,8 @@ def transcribe_meeting(wav_path, out_dir, *, lang="id", min_speakers=None,
     if vad_model is None:
         raise ModelNotFoundError(
             f"missing VAD model: no {VAD_GLOB} in {MODELS_DIR}")
-    if not wav.exists():
-        raise PipelineError(f"recording not found: {wav}")
+    if not src.exists():
+        raise PipelineError(f"recording not found: {src}")
 
     prefix = out / "transcript"
     json_path = out / "transcript.json"
@@ -283,30 +363,31 @@ def transcribe_meeting(wav_path, out_dir, *, lang="id", min_speakers=None,
     output = out / "output.txt"
 
     emit("prepare", 0.0, "reading audio…")
-    duration = probe_duration(wav)
+    duration = probe_duration(src)
 
-    emit("transcribe", 0.0, "starting transcription…")
-    _run_whisper(wav, prefix, model_file, vad_model, lang, duration, emit, on_proc)
-    if not json_path.exists():
-        raise WhisperError("whisper-cli produced no JSON output")
+    with as_wav(src) as wav:
+        emit("transcribe", 0.0, "starting transcription…")
+        _run_whisper(wav, prefix, model_file, vad_model, lang, duration, emit, on_proc)
+        if not json_path.exists():
+            raise WhisperError("whisper-cli produced no JSON output")
 
-    diar_ok, warn = False, None
-    if diarize:
-        token = (hf_token or os.environ.get("HF_TOKEN") or "").strip()
-        if not token:
-            warn = "no HuggingFace token"
-            if strict:
-                raise TokenMissingError(warn)
-        else:
-            try:
-                emit("diarize", WHISPER_W, "starting diarization…")
-                _run_diarize(wav, json_path, merged, token,
-                             min_speakers, max_speakers, tx_python, emit, on_proc)
-                diar_ok = merged.exists()
-            except DiarizationError as e:
-                warn = str(e).splitlines()[0]
+        diar_ok, warn = False, None
+        if diarize:
+            token = (hf_token or os.environ.get("HF_TOKEN") or "").strip()
+            if not token:
+                warn = "no HuggingFace token"
                 if strict:
-                    raise
+                    raise TokenMissingError(warn)
+            else:
+                try:
+                    emit("diarize", WHISPER_W, "starting diarization…")
+                    _run_diarize(wav, json_path, merged, token,
+                                 min_speakers, max_speakers, tx_python, emit, on_proc)
+                    diar_ok = merged.exists()
+                except DiarizationError as e:
+                    warn = str(e).splitlines()[0]
+                    if strict:
+                        raise
 
     _write_output(output, txt_path, merged if diar_ok else None,
                   meeting=out.name, lang=lang, model=model, duration=duration,
@@ -314,7 +395,7 @@ def transcribe_meeting(wav_path, out_dir, *, lang="id", min_speakers=None,
                   diar_ok=diar_ok, warn=warn)
     emit("done", 1.0, "complete" if diar_ok else "complete (transcript only)")
     return {
-        "wav": wav, "json": json_path, "txt": txt_path,
+        "wav": src, "json": json_path, "txt": txt_path,
         "merged": merged if diar_ok else None, "output": output,
         "duration": duration, "diarized": diar_ok, "warning": warn,
     }

@@ -17,7 +17,8 @@ import subprocess
 import sys
 
 HERE = pathlib.Path(__file__).resolve().parent
-SUITES = ["test_dsp.py", "test_appcore.py", "test_winhost.py", "test_deps.py", "test_cloud.py"]
+SUITES = ["test_dsp.py", "test_appcore.py", "test_winhost.py", "test_deps.py", "test_cloud.py",
+          "test_audio.py"]
 JS_SUITES = ["test_meetlist.js", "test_cloudest.js"]        # skipped when node isn't installed
 
 # The suites print what the app shows — toasts with a gear, en dashes — and a

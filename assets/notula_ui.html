@@ -153,6 +153,8 @@ a{color:var(--link);}
 .f .unit{font-size:13px; color:var(--text-help); padding:0 14px 0 0;}
 .f input:disabled{color:var(--text-place);}
 .f .help{font-size:10px; color:var(--text-help); margin-top:3px; letter-spacing:.24px;}
+.storerow{display:flex; align-items:center; gap:12px; flex-wrap:wrap; min-height:36px;}
+.storenote{flex:1 1 220px; font-size:13px; color:var(--text);}
 .f select{-webkit-appearance:none; appearance:none; width:100%;
   background:var(--field); color:var(--text); border:0; border-bottom:1px solid var(--border-strong);
   height:36px; padding:0 40px 0 16px; font-family:inherit; font-size:14px; border-radius:0; cursor:pointer;
@@ -556,6 +558,16 @@ a{color:var(--link);}
         <span class="help">Where new meeting folders are saved — type a path or browse.
           Changing it leaves existing meetings where they are.</span>
       </div>
+      <div class="f full">
+        <label>Recordings</label>
+        <div class="storerow">
+          <span class="storenote" id="store_note">Saved as FLAC: lossless, about half the size of WAV.</span>
+          <button class="btn btn-secondary small" id="store_btn" hidden
+                  onclick="post('compressAudio')">Compress</button>
+        </div>
+        <span class="help">FLAC keeps every sample, so transcripts come out the same.
+          Each file is checked against the original before the WAV is removed.</span>
+      </div>
     </div>
   </section>
 
@@ -689,6 +701,31 @@ function fmtUsd(usd){
   if(!(usd>0)) return '$0.00';
   if(usd<0.01) return 'less than $0.01';
   return '$'+usd.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+function fmtBytes(n){
+  var mb = (Number(n)||0)/1e6;
+  return mb>=1000 ? (mb/1000).toFixed(1)+' GB' : Math.max(1, Math.round(mb))+' MB';
+}
+/* Settings → Recordings: older meetings saved as WAV, and the button that
+   turns them into FLAC. Busy meetings are skipped, as Python skips them. */
+function renderStorage(){
+  var note=$('store_note'), btn=$('store_btn');
+  if(!note || !btn) return;
+  var c = STATE.compress;
+  if(c){
+    note.textContent = 'Compressing… '+c.done+' of '+c.total+' files';
+    btn.hidden=false; btn.disabled=true; btn.textContent='Compressing…';
+    return;
+  }
+  var busy={recording:1, paused:1, importing:1, transcribing:1}, n=0, bytes=0;
+  MEETINGS.forEach(function(m){
+    if(m.wavBytes>0 && !busy[m.status] && m.id!==STATE.txId){ n++; bytes+=m.wavBytes; }
+  });
+  btn.textContent='Compress'; btn.disabled=false; btn.hidden = !n;
+  note.textContent = n
+    ? n+(n===1?' older recording is':' older recordings are')+' uncompressed WAV, '
+      +fmtBytes(bytes)+'. Compressing frees about half of that.'
+    : 'Saved as FLAC: lossless, about half the size of WAV.';
 }
 function fmtClock(seconds){
   var s=Math.round(Math.max(0, Number(seconds)||0)), m=Math.floor(s/60), h=Math.floor(m/60);
@@ -1026,6 +1063,7 @@ function fillSelect(id, opts, sel){
 
 window.notulaState = function(st){
   STATE = st;
+  renderStorage();
   PAUSED = !!st.paused;
   /* header pill */
   var h=$('hstat'); var kind = st.recording?(st.paused?'paused':'rec'):(st.txId?'busy':'');
@@ -1183,6 +1221,7 @@ function renderMeetings(){
 
 window.notulaMeetings = function(list){
   MEETINGS = list||[];
+  renderStorage();
   /* an edit only survives if its row is still there (a rename changes the id) */
   if(EDIT && !MEETINGS.some(function(m){ return m.id===EDIT.id; })) EDIT=null;
   renderMeetings();

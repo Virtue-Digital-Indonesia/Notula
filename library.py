@@ -4,7 +4,8 @@ notula.library — the on-disk meeting library.
 Each meeting is a folder under the library root:
 
     <library>/2026-07-23_1430_weekly-sync/
-        audio.wav               the recording (16 kHz mono)
+        audio.flac              the recording, 16 kHz mono (older ones are audio.wav)
+        src_mic.flac, …         each source before mixing (mic, computer audio)
         meta.json               name, timestamps, device, status, duration…
         transcript.json         whisper raw (after transcription)
         transcript.txt          plain transcript
@@ -33,7 +34,10 @@ TRANSCRIBING = "transcribing"
 TRANSCRIBED = "transcribed"
 ERROR = "error"
 
-AUDIO = "audio.wav"
+AUDIO = "audio.flac"     # what a new recording is saved as: lossless, about half of WAV
+# What an existing one may be: WAV from older versions, or whatever a library
+# compressed by hand holds. The first one found wins.
+AUDIO_NAMES = (AUDIO, "audio.wav", "audio.m4a", "audio.mp3", "audio.ogg", "audio.opus")
 META = "meta.json"
 OUTPUT = "output.txt"
 TRANSCRIPT_JSON = "transcript.json"
@@ -74,7 +78,30 @@ def path(root: str, mid: str, name: str) -> str:
 
 
 def audio_path(root: str, mid: str) -> str:
+    """The meeting's recording in whatever format it's in, or where a new one goes."""
+    for name in AUDIO_NAMES:
+        p = path(root, mid, name)
+        if os.path.exists(p):
+            return p
     return path(root, mid, AUDIO)
+
+
+def wav_files(meeting_dir: str) -> list[str]:
+    """The WAVs Notula wrote in a meeting folder: the mix and each source
+    track. pipeline.compress_wav turns them into FLAC without losing a sample."""
+    try:
+        names = sorted(os.listdir(meeting_dir))
+    except OSError:
+        return []
+    return [os.path.join(meeting_dir, n) for n in names
+            if n == "audio.wav" or (n.startswith("src_") and n.endswith(".wav"))]
+
+
+def _size(p: str) -> int:
+    try:
+        return os.path.getsize(p)
+    except OSError:
+        return 0
 
 
 def output_path(root: str, mid: str) -> str:
@@ -305,6 +332,8 @@ def describe(root: str, mid: str) -> dict:
         "warning": meta.get("warning"),
         "hasOutput": os.path.exists(output_path(root, mid)),
         "hasAudio": os.path.exists(audio_path(root, mid)),
+        # what Settings → Compress would shrink
+        "wavBytes": sum(_size(p) for p in wav_files(folder(root, mid))),
         # how the last transcription was made, and what it cost if it was billed
         "engine": meta.get("engine") or "",
         "model": meta.get("model") or "",

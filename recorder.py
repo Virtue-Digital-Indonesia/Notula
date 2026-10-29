@@ -5,7 +5,7 @@ Recording is done in-process with sounddevice (PortAudio) rather than handing a
 device to ffmpeg, so the app can (a) show a live level meter per source and
 (b) mute a source on the fly. Each source captures 16 kHz mono float32 and is
 written to its own WAV via the stdlib `wave` module; on stop, multiple sources
-are mixed down to a single whisper-ready `audio.wav` with ffmpeg's amix.
+are mixed down to a single `audio.flac` with ffmpeg's amix.
 
 Two source kinds:
   * "mic"     — a normal input device (your microphone), captured here
@@ -349,7 +349,7 @@ class RecordingEngine:
         Renaming a directory moves its inode, so the capture threads keep
         writing through their already-open handles without noticing. Only the
         paths we resolve *later* — the per-source WAVs we mix at stop() and the
-        final audio.wav — have to be rewritten to the new location.
+        final audio.flac — have to be rewritten to the new location.
         """
         self.folder = new_folder
         for src in self.sources:
@@ -373,9 +373,11 @@ class RecordingEngine:
         self._started = False
 
     def stop(self) -> str:
-        """Stop capture and produce the final mono 16 kHz audio.wav. Returns its path."""
+        """Stop capture and produce the final mono 16 kHz recording: audio.flac,
+        or audio.wav when ffmpeg can't run. Returns its path. The per-source
+        WAVs stay; pipeline.compress_wav can shrink them afterwards."""
         self.stop_streams()
-        final = os.path.join(self.folder, "audio.wav")
+        final = os.path.join(self.folder, "audio.flac")
         # only mix sources that actually captured something
         wavs = [s.wav_path for s in self.sources
                 if os.path.exists(s.wav_path) and s.frames > 0]
@@ -383,18 +385,20 @@ class RecordingEngine:
             wavs = [s.wav_path for s in self.sources if os.path.exists(s.wav_path)]
         if not wavs:
             return final
-        if len(wavs) == 1:
-            shutil.copyfile(wavs[0], final)
-            return final
-        # mix multiple sources; amix keeps the longest, normalize=0 preserves level
         cmd = [FFMPEG, "-hide_banner", "-loglevel", "error", "-y"]
         for w in wavs:
             cmd += ["-i", w]
-        cmd += ["-filter_complex", f"amix=inputs={len(wavs)}:normalize=0:duration=longest",
-                "-ar", str(SR), "-ac", "1", final]
+        if len(wavs) > 1:
+            # mix multiple sources; amix keeps the longest, normalize=0 preserves level
+            cmd += ["-filter_complex", f"amix=inputs={len(wavs)}:normalize=0:duration=longest"]
+        cmd += ["-ar", str(SR), "-ac", "1", "-c:a", "flac", final]
         try:
             subprocess.run(cmd, check=True, capture_output=True,
                            **osutil.popen_kwargs(new_group=False))
         except (OSError, subprocess.CalledProcessError):
+            # a half-written FLAC would be found ahead of the WAV
+            if os.path.exists(final):
+                os.remove(final)
+            final = os.path.join(self.folder, "audio.wav")
             shutil.copyfile(wavs[0], final)   # fall back to the first source
         return final

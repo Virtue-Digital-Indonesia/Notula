@@ -14,7 +14,7 @@ Deliberately importable on its own: setup.py and the build scripts read it
 without dragging in numpy, sounddevice or pyobjc.
 """
 
-VERSION = "2.0.0-beta4"
+VERSION = "2.0.0-beta5"
 VERSION_SHORT = "2.0.0"     # numeric only, for Info.plist
 
 # 2.0 because this is the release that made Notula cross-platform: a second
@@ -36,6 +36,11 @@ VERSION_SHORT = "2.0.0"     # numeric only, for Info.plist
 # launch prompt now takes either and asks only when neither is set. beta3 asked
 # for the HuggingFace token on every launch, even for someone transcribing with
 # OpenAI, which made both look required.
+#
+# beta5: recordings are saved as FLAC, which is lossless and about half the
+# size of WAV; ⚙ → Recordings → Compress converts older WAVs, checking every
+# sample before deleting one. A library compressed by hand (m4a, mp3…) is read
+# too, where beta4 lost the Transcribe button on anything that wasn't audio.wav.
 #
 # Still beta: the Windows half has not yet recorded a real meeting, and the
 # cloud engine has been exercised against a stub of the API, not the real one.
